@@ -349,11 +349,14 @@ class DeliveryService:
                 delivery_type=DeliveryType(attempt.delivery_type),
                 recipient_id=attempt.recipient_id,
                 last_attempt_number=attempt.attempt_number,
-                next_retry_at=attempt.completed_at + retry_delay,
+                next_retry_at=(
+                    attempt.completed_at + retry_delay
+                    if attempt.completed_at is not None
+                    else None
+                ),
                 **self._sla_recovery_identity(attempt),
             )
             for attempt in attempts
-            if attempt.completed_at is not None
         ]
 
     @staticmethod

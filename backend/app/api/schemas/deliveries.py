@@ -61,7 +61,7 @@ class RetryableDeliveryResponse(BaseModel):
     delivery_type: DeliveryType
     recipient_id: str
     last_attempt_number: int
-    next_retry_at: datetime
+    next_retry_at: datetime | None
     sla_action_type: SlaActionType | None
     sla_action_level: int | None
 

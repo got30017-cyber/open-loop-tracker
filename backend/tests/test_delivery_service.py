@@ -785,6 +785,51 @@ def test_retryable_sla_delivery_exposes_authoritative_ack_identity(
     assert retryable[0].sla_action_level == level
 
 
+
+def test_recovery_discovery_resumes_pending_retry_without_attempt_three(
+    db_session: Session,
+) -> None:
+    cases, service, public_id = delivery_setup(db_session)
+    first = start(service, public_id, now=START).attempt
+    complete(
+        service,
+        outcome=DeliveryStatus.FAILED,
+        error_message="transport failed",
+        now=START,
+    )
+
+    retry_at = START + timedelta(minutes=5)
+    assert [item.last_attempt_number for item in service.get_retryable_deliveries(retry_at)] == [1]
+
+    second = start(service, public_id, now=retry_at)
+    assert second.already_processed is False
+    assert second.attempt.attempt_number == 2
+    assert second.attempt.status == DeliveryStatus.PENDING.value
+
+    discovered = service.get_retryable_deliveries(retry_at)
+    assert len(discovered) == 1
+    assert discovered[0].idempotency_key == first.idempotency_key
+    assert discovered[0].last_attempt_number == 2
+    assert discovered[0].next_retry_at is None
+
+    resumed = start(service, public_id, now=retry_at)
+    assert resumed.already_processed is True
+    assert resumed.attempt.id == second.attempt.id
+    assert resumed.attempt.attempt_number == 2
+    assert len(service.delivery_repository.get_attempts("delivery-key")) == 2
+
+    complete(
+        service,
+        attempt_number=2,
+        outcome=DeliveryStatus.SUCCEEDED,
+        external_message_id="retry-success",
+        now=retry_at,
+    )
+
+    assert cases.get_case(public_id).status is CaseStatus.WAITING_CLIENT
+    assert event_count(db_session, first.case_id, CaseEventType.CLIENT_REQUEST_SENT) == 1
+    assert service.get_retryable_deliveries(retry_at) == []
+
 def test_failed_client_request_keeps_case_new_without_sent_event(
     db_session: Session,
 ) -> None:

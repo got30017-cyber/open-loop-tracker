@@ -138,7 +138,9 @@ def test_failure_retry_not_due_and_retryable_query(
     assert retry.status_code == 200
     assert retry.json()["attempt_number"] == 2
     assert retry.json()["already_processed"] is False
-    assert client.get("/api/v1/deliveries/retryable").json() == []
+    pending_recovery = client.get("/api/v1/deliveries/retryable").json()
+    assert pending_recovery[0]["last_attempt_number"] == 2
+    assert pending_recovery[0]["next_retry_at"] is None
     events = client.get(f"/api/v1/cases/{public_id}/events").json()
     assert [event["event_type"] for event in events].count("DELIVERY_FAILED") == 1
     assert [event["event_type"] for event in events].count("DELIVERY_RETRIED") == 1
