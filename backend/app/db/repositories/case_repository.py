@@ -25,6 +25,15 @@ class CaseRepository:
     def add_event(self, event: CaseEventRecord) -> None:
         self.session.add(event)
 
+    def get_event_by_deduplication_key(
+        self, deduplication_key: str
+    ) -> CaseEventRecord | None:
+        return self.session.scalar(
+            select(CaseEventRecord).where(
+                CaseEventRecord.deduplication_key == deduplication_key
+            )
+        )
+
     def add_client_reply(self, reply: ClientReplyRecord) -> None:
         self.session.add(reply)
 

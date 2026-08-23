@@ -1,9 +1,12 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
+from app.db.models import CaseEventRecord
 from app.domain.enums import CaseEventType, CaseStatus
 from app.domain.sla import SlaActionType
 from app.services import CaseService, SlaService
@@ -164,6 +167,127 @@ def test_reminder_acknowledgement_writes_exact_level_once(
     assert first.already_processed is False
     assert second.already_processed is True
     assert [event.metadata_json for event in reminders] == [{"level": 1}]
+    assert reminders[0].deduplication_key == (
+        f"sla:{public_id}:REMIND_CLIENT:1"
+    )
+
+
+def test_acknowledgement_unique_collision_is_reclassified_after_rollback(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cases, sla, public_id = waiting_client(db_session)
+    case = cases.get_case(public_id)
+    deduplication_key = f"sla:{public_id}:REMIND_CLIENT:1"
+    db_session.add(
+        CaseEventRecord(
+            case_id=case.id,
+            event_type=CaseEventType.CLIENT_REMINDER_SENT,
+            metadata_json={"level": 1},
+            deduplication_key=deduplication_key,
+        )
+    )
+    db_session.commit()
+    original_lookup = sla.repository.get_event_by_deduplication_key
+    lookup_count = 0
+    rollback_count = 0
+    original_rollback = db_session.rollback
+
+    def miss_before_insert(key: str) -> CaseEventRecord | None:
+        nonlocal lookup_count
+        lookup_count += 1
+        if lookup_count == 1:
+            return None
+        return original_lookup(key)
+
+    def counted_rollback() -> None:
+        nonlocal rollback_count
+        rollback_count += 1
+        original_rollback()
+
+    monkeypatch.setattr(
+        sla.repository, "get_event_by_deduplication_key", miss_before_insert
+    )
+    monkeypatch.setattr(db_session, "rollback", counted_rollback)
+
+    result = sla.acknowledge_action(
+        public_id,
+        SlaActionType.REMIND_CLIENT,
+        level=1,
+        now=START + timedelta(hours=2),
+    )
+
+    events = list(
+        db_session.scalars(
+            select(CaseEventRecord).where(
+                CaseEventRecord.deduplication_key == deduplication_key
+            )
+        )
+    )
+    assert result.already_processed is True
+    assert lookup_count == 2
+    assert rollback_count == 1
+    assert len(events) == 1
+
+
+def test_unrelated_acknowledgement_integrity_error_is_preserved(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _cases, sla, public_id = waiting_client(db_session)
+    original_add_event = sla.repository.add_event
+
+    def add_invalid_event(event: CaseEventRecord) -> None:
+        event.event_type = None  # type: ignore[assignment]
+        original_add_event(event)
+
+    monkeypatch.setattr(sla.repository, "add_event", add_invalid_event)
+
+    with pytest.raises(IntegrityError):
+        sla.acknowledge_action(
+            public_id,
+            SlaActionType.REMIND_CLIENT,
+            level=1,
+            now=START + timedelta(hours=2),
+        )
+
+    db_session.expire_all()
+    assert (
+        db_session.scalar(
+            select(CaseEventRecord).where(
+                CaseEventRecord.deduplication_key
+                == f"sla:{public_id}:REMIND_CLIENT:1"
+            )
+        )
+        is None
+    )
+
+
+def test_reminder_and_escalation_deduplication_keys_are_distinct(
+    db_session: Session,
+) -> None:
+    _cases, sla, public_id = waiting_client(db_session)
+    sla.acknowledge_action(
+        public_id,
+        SlaActionType.REMIND_CLIENT,
+        level=1,
+        now=START + timedelta(hours=2),
+    )
+    sla.acknowledge_action(
+        public_id,
+        SlaActionType.ESCALATE_CLIENT_WAIT,
+        now=START + timedelta(hours=24),
+    )
+
+    events = list(
+        db_session.scalars(
+            select(CaseEventRecord).where(
+                CaseEventRecord.deduplication_key.is_not(None)
+            )
+        )
+    )
+    assert {event.deduplication_key for event in events} == {
+        f"sla:{public_id}:REMIND_CLIENT:1",
+        f"sla:{public_id}:ESCALATE_CLIENT_WAIT",
+    }
 
 
 def test_moderator_escalation_acknowledgement_records_wait_type(

@@ -1,7 +1,9 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from sqlite3 import SQLITE_CONSTRAINT_UNIQUE, IntegrityError as SQLiteIntegrityError
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
@@ -22,6 +24,17 @@ from app.services.case_service import CaseNotFoundError
 class InvalidSlaActionError(RuntimeError):
     def __init__(self, message: str) -> None:
         super().__init__(message)
+
+
+def _is_duplicate_sla_acknowledgement(error: IntegrityError) -> bool:
+    original_error = error.orig
+    return (
+        isinstance(original_error, SQLiteIntegrityError)
+        and getattr(original_error, "sqlite_errorcode", None)
+        == SQLITE_CONSTRAINT_UNIQUE
+        and str(original_error)
+        == "UNIQUE constraint failed: case_events.deduplication_key"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,16 +104,20 @@ class SlaService:
         actor_id: str | None = None,
         now: datetime | None = None,
     ) -> AcknowledgeActionResult:
+        deduplication_key: str | None = None
+        identity = (action_type, level)
         try:
             case = self.repository.get_case(case_public_id)
             if case is None:
                 raise CaseNotFoundError(case_public_id)
 
-            identity = (action_type, level)
-            acknowledged = self._acknowledged_actions(
-                self.repository.get_case_events(case.id)
+            deduplication_key = self._deduplication_key(
+                case.public_id, action_type, level
             )
-            if identity in acknowledged:
+            if (
+                self.repository.get_event_by_deduplication_key(deduplication_key)
+                is not None
+            ):
                 return AcknowledgeActionResult(
                     case_public_id=case_public_id,
                     action_type=action_type,
@@ -124,6 +141,7 @@ class SlaService:
                     actor_id=actor_id,
                     created_at=acknowledged_at,
                     metadata_json=metadata,
+                    deduplication_key=deduplication_key,
                 )
             )
             self.session.commit()
@@ -132,6 +150,28 @@ class SlaService:
                 action_type=action_type,
                 level=level,
                 already_processed=False,
+            )
+        except IntegrityError as error:
+            self.session.rollback()
+            if (
+                deduplication_key is None
+                or not _is_duplicate_sla_acknowledgement(error)
+            ):
+                raise
+            persisted_event = self.repository.get_event_by_deduplication_key(
+                deduplication_key
+            )
+            if (
+                persisted_event is None
+                or persisted_event.case.public_id != case_public_id
+                or identity not in self._acknowledged_actions([persisted_event])
+            ):
+                raise
+            return AcknowledgeActionResult(
+                case_public_id=case_public_id,
+                action_type=action_type,
+                level=level,
+                already_processed=True,
             )
         except Exception:
             self.session.rollback()
@@ -239,6 +279,17 @@ class SlaService:
         if action_type is SlaActionType.ESCALATE_MODERATOR_WAIT:
             return CaseEventType.CASE_ESCALATED, {"wait_type": "moderator"}
         raise InvalidSlaActionError(f"Unsupported SLA action: {action_type}")
+
+    @staticmethod
+    def _deduplication_key(
+        case_public_id: str,
+        action_type: SlaActionType,
+        level: int | None,
+    ) -> str:
+        key = f"sla:{case_public_id}:{action_type.value}"
+        if level is not None:
+            key = f"{key}:{level}"
+        return key
 
     @staticmethod
     def _acknowledged_actions(

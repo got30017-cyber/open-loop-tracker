@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import JSON, DateTime, Enum, ForeignKey, Text
+from sqlalchemy import JSON, DateTime, Enum, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.database import Base
@@ -36,5 +36,8 @@ class CaseEventRecord(Base):
         DateTime(timezone=False), default=utc_now, nullable=False
     )
     metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    deduplication_key: Mapped[str | None] = mapped_column(
+        String(255), unique=True, nullable=True
+    )
 
     case: Mapped["CaseRecord"] = relationship(back_populates="events")
