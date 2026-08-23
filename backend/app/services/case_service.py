@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from sqlite3 import SQLITE_CONSTRAINT_UNIQUE, IntegrityError as SQLiteIntegrityError
 from typing import Any
 from uuid import uuid4
@@ -29,6 +30,26 @@ class DuplicateClientReplyError(CaseServiceError):
         super().__init__(
             f"Client reply external_message_id already exists: {external_message_id}"
         )
+
+
+class ExternalMessageIdConflictError(DuplicateClientReplyError):
+    def __init__(self, external_message_id: str, public_id: str) -> None:
+        self.external_message_id = external_message_id
+        self.public_id = public_id
+        CaseServiceError.__init__(
+            self,
+            f"external_message_id {external_message_id} belongs to a different case",
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CommandResult:
+    case: CaseRecord
+    already_processed: bool
+
+    def __getattr__(self, name: str) -> Any:
+        """Keep accepted CaseRecord-style reads compatible for service callers."""
+        return getattr(self.case, name)
 
 
 def _is_duplicate_external_message_id(error: IntegrityError) -> bool:
@@ -89,9 +110,11 @@ class CaseService:
         public_id: str,
         actor_type: str | None = None,
         actor_id: str | None = None,
-    ) -> CaseRecord:
+    ) -> CommandResult:
         try:
             case = self._require_case(public_id)
+            if case.status is CaseStatus.WAITING_CLIENT:
+                return CommandResult(case=case, already_processed=True)
             self._apply_transition(case, CaseStatus.WAITING_CLIENT)
             case.updated_at = utc_now()
             self.repository.add_event(
@@ -100,7 +123,7 @@ class CaseService:
                 )
             )
             self.session.commit()
-            return case
+            return CommandResult(case=case, already_processed=False)
         except Exception:
             self.session.rollback()
             raise
@@ -111,9 +134,18 @@ class CaseService:
         external_message_id: str,
         text: str,
         sender_id: str | None = None,
-    ) -> CaseRecord:
+    ) -> CommandResult:
+        case_id: int | None = None
         try:
             case = self._require_case(public_id)
+            case_id = case.id
+            existing_reply = self.repository.get_client_reply(external_message_id)
+            if existing_reply is not None:
+                if existing_reply.case_id != case.id:
+                    raise ExternalMessageIdConflictError(
+                        external_message_id, public_id
+                    )
+                return CommandResult(case=case, already_processed=True)
             self._validate_transition(case, CaseStatus.WAITING_MODERATOR)
             case.status = CaseStatus.WAITING_MODERATOR
             case.updated_at = utc_now()
@@ -135,12 +167,23 @@ class CaseService:
                 )
             )
             self.session.commit()
-            return case
+            return CommandResult(case=case, already_processed=False)
         except IntegrityError as error:
             self.session.rollback()
-            if _is_duplicate_external_message_id(error):
-                raise DuplicateClientReplyError(external_message_id) from error
-            raise
+            if not _is_duplicate_external_message_id(error):
+                raise
+
+            existing_reply = self.repository.get_client_reply(external_message_id)
+            if existing_reply is None or case_id is None:
+                raise
+            if existing_reply.case_id != case_id:
+                self.session.rollback()
+                raise ExternalMessageIdConflictError(
+                    external_message_id, public_id
+                ) from error
+
+            persisted_case = self._require_case(public_id)
+            return CommandResult(case=persisted_case, already_processed=True)
         except Exception:
             self.session.rollback()
             raise
@@ -150,9 +193,11 @@ class CaseService:
         public_id: str,
         actor_type: str | None = None,
         actor_id: str | None = None,
-    ) -> CaseRecord:
+    ) -> CommandResult:
         try:
             case = self._require_case(public_id)
+            if case.status is CaseStatus.CLOSED:
+                return CommandResult(case=case, already_processed=True)
             self._apply_transition(case, CaseStatus.CLOSED)
             now = utc_now()
             case.closed_at = now
@@ -168,7 +213,7 @@ class CaseService:
                 self._event(case, CaseEventType.CASE_CLOSED, actor_type, actor_id)
             )
             self.session.commit()
-            return case
+            return CommandResult(case=case, already_processed=False)
         except Exception:
             self.session.rollback()
             raise
@@ -179,9 +224,11 @@ class CaseService:
         cancellation_reason: str,
         actor_type: str | None = None,
         actor_id: str | None = None,
-    ) -> CaseRecord:
+    ) -> CommandResult:
         try:
             case = self._require_case(public_id)
+            if case.status is CaseStatus.CANCELLED:
+                return CommandResult(case=case, already_processed=True)
             self._apply_transition(case, CaseStatus.CANCELLED)
             now = utc_now()
             case.cancelled_at = now
@@ -191,7 +238,7 @@ class CaseService:
                 self._event(case, CaseEventType.CASE_CANCELLED, actor_type, actor_id)
             )
             self.session.commit()
-            return case
+            return CommandResult(case=case, already_processed=False)
         except Exception:
             self.session.rollback()
             raise
@@ -202,10 +249,12 @@ class CaseService:
         new_moderator_id: str | None,
         actor_type: str | None = None,
         actor_id: str | None = None,
-    ) -> CaseRecord:
+    ) -> CommandResult:
         try:
             case = self._require_case(public_id)
             old_moderator_id = case.moderator_id
+            if old_moderator_id == new_moderator_id:
+                return CommandResult(case=case, already_processed=True)
             case.moderator_id = new_moderator_id
             case.updated_at = utc_now()
             self.repository.add_event(
@@ -221,7 +270,7 @@ class CaseService:
                 )
             )
             self.session.commit()
-            return case
+            return CommandResult(case=case, already_processed=False)
         except Exception:
             self.session.rollback()
             raise
