@@ -1,0 +1,14 @@
+services:
+  api:
+    build:
+      context: ./backend
+    environment:
+      APP_ENV: development
+      DATABASE_URL: sqlite:////data/open_loop_tracker.db
+    ports:
+      - "8000:8000"
+    volumes:
+      - open_loop_data:/data
+
+volumes:
+  open_loop_data:
