@@ -10,8 +10,9 @@ from app.db.models import CaseEventRecord, DeliveryAttemptRecord
 from app.db.models.common import as_naive_utc, utc_now
 from app.db.repositories import CaseRepository, DeliveryRepository
 from app.domain.delivery import DeliveryStatus, DeliveryType, RetryableDelivery
-from app.domain.enums import CaseEventType
-from app.services.case_service import CaseNotFoundError
+from app.domain.enums import CaseEventType, CaseStatus
+from app.domain.state_machine import InvalidStateTransition
+from app.services.case_service import CaseNotFoundError, CaseService
 
 
 class DeliveryServiceError(RuntimeError):
@@ -109,6 +110,11 @@ class DeliveryService:
         self.delivery_repository = delivery_repository or DeliveryRepository(session)
         self.case_repository = case_repository or CaseRepository(session)
         self.settings = settings or get_settings()
+        self.case_service = CaseService(
+            session,
+            repository=self.case_repository,
+            settings=self.settings,
+        )
 
     def start_delivery_attempt(
         self,
@@ -287,6 +293,8 @@ class DeliveryService:
                         event_suffix="failed",
                     )
                 )
+            if outcome is DeliveryStatus.SUCCEEDED:
+                self._apply_successful_delivery_effect(attempt, completed_at)
             self.session.commit()
             return self._result(
                 case_public_id,
@@ -408,6 +416,47 @@ class DeliveryService:
                 f"{event_suffix}"
             ),
         )
+
+    def _apply_successful_delivery_effect(
+        self,
+        attempt: DeliveryAttemptRecord,
+        completed_at: datetime,
+    ) -> None:
+        delivery_type = DeliveryType(attempt.delivery_type)
+        metadata = {
+            "delivery_type": delivery_type.value,
+            "attempt_number": attempt.attempt_number,
+            "idempotency_key": attempt.idempotency_key,
+            "external_message_id": attempt.external_message_id,
+        }
+        deduplication_key = (
+            f"delivery:{attempt.idempotency_key}:business-success"
+        )
+        if delivery_type is DeliveryType.CLIENT_REQUEST:
+            self.case_service._stage_client_request_sent(
+                attempt.case,
+                command_time=completed_at,
+                actor_type="transport",
+                actor_id=attempt.recipient_id,
+                metadata_json=metadata,
+                deduplication_key=deduplication_key,
+            )
+        elif delivery_type is DeliveryType.MODERATOR_NOTIFICATION:
+            if attempt.case.status is not CaseStatus.WAITING_MODERATOR:
+                raise InvalidStateTransition(
+                    attempt.case.status, CaseStatus.WAITING_MODERATOR
+                )
+            self.case_repository.add_event(
+                CaseEventRecord(
+                    case_id=attempt.case_id,
+                    event_type=CaseEventType.MODERATOR_NOTIFIED,
+                    actor_type="transport",
+                    actor_id=attempt.recipient_id,
+                    created_at=completed_at,
+                    metadata_json=metadata,
+                    deduplication_key=deduplication_key,
+                )
+            )
 
     @staticmethod
     def _result(

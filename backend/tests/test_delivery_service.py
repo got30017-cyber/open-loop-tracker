@@ -42,7 +42,11 @@ def delivery_setup(
     message: str = "Question",
 ) -> tuple[CaseService, DeliveryService, str]:
     cases = CaseService(db_session, settings=configured)
-    case = cases.create_case(message)
+    case = cases.create_case(
+        message,
+        moderator_id='moderator-1',
+        client_contact_id='client-1',
+    )
     return cases, DeliveryService(db_session, settings=configured), case.public_id
 
 
@@ -142,8 +146,12 @@ def test_success_completion_and_retry_are_idempotent(
     assert first.attempt.error_message is None
     assert repeated.already_processed is True
     assert repeated.attempt.completed_at == completed_at
-    assert cases.get_case(public_id).status is CaseStatus.NEW
-    assert len(cases.get_case_events(public_id)) == 1
+    assert cases.get_case(public_id).status is CaseStatus.WAITING_CLIENT
+    assert event_count(
+        db_session,
+        first.attempt.case_id,
+        CaseEventType.CLIENT_REQUEST_SENT,
+    ) == 1
 
 
 def test_failure_completion_and_retry_write_one_event(
@@ -263,7 +271,10 @@ def install_competing_completion(
             **_requested
         )
         assert losing_transition is False
-        if winner is DeliveryStatus.FAILED:
+        if winner is DeliveryStatus.SUCCEEDED:
+            db_session.refresh(attempt)
+            service._apply_successful_delivery_effect(attempt, completed_at)
+        else:
             service.case_repository.add_event(
                 service._delivery_event(
                     case_id=attempt.case_id,
@@ -344,7 +355,7 @@ def test_success_winner_is_not_overwritten_by_competing_failure(
     assert event_count(
         db_session, attempt.case_id, CaseEventType.DELIVERY_FAILED
     ) == 0
-    assert cases.get_case(public_id).status is CaseStatus.NEW
+    assert cases.get_case(public_id).status is CaseStatus.WAITING_CLIENT
 
 
 def test_failure_winner_is_immutable_and_writes_one_failure_event(
@@ -705,6 +716,145 @@ def test_retryable_query_filters_orders_and_has_no_side_effects(
         select(func.count()).select_from(DeliveryAttemptRecord)
     ) == initial_attempts
     assert len(cases.get_case_events(public_id)) == initial_events
+
+
+def test_failed_client_request_keeps_case_new_without_sent_event(
+    db_session: Session,
+) -> None:
+    cases, service, public_id = delivery_setup(db_session)
+    attempt = start(service, public_id).attempt
+
+    complete(
+        service,
+        outcome=DeliveryStatus.FAILED,
+        error_message='simulated transport failure',
+        now=START,
+    )
+
+    assert cases.get_case(public_id).status is CaseStatus.NEW
+    assert event_count(
+        db_session, attempt.case_id, CaseEventType.CLIENT_REQUEST_SENT
+    ) == 0
+
+
+def test_moderator_notification_success_is_idempotent_and_keeps_state(
+    db_session: Session,
+) -> None:
+    cases, service, public_id = delivery_setup(db_session)
+    start(service, public_id, key='client-request')
+    complete(
+        service,
+        key='client-request',
+        outcome=DeliveryStatus.SUCCEEDED,
+        external_message_id='client-request-external',
+        now=START,
+    )
+    cases.record_client_reply(
+        public_id,
+        external_message_id='reply-1',
+        text='Client answer',
+        sender_id='client-1',
+        now=START,
+    )
+    notification = start(
+        service,
+        public_id,
+        key='moderator-notification:reply-1',
+        delivery_type=DeliveryType.MODERATOR_NOTIFICATION,
+        recipient_id='moderator-1',
+    ).attempt
+
+    first = complete(
+        service,
+        key='moderator-notification:reply-1',
+        outcome=DeliveryStatus.SUCCEEDED,
+        external_message_id='moderator-external',
+        now=START,
+    )
+    repeated = complete(
+        service,
+        key='moderator-notification:reply-1',
+        outcome=DeliveryStatus.SUCCEEDED,
+        external_message_id='moderator-external',
+        now=START + timedelta(minutes=1),
+    )
+
+    assert first.already_processed is False
+    assert repeated.already_processed is True
+    assert cases.get_case(public_id).status is CaseStatus.WAITING_MODERATOR
+    assert event_count(
+        db_session, notification.case_id, CaseEventType.MODERATOR_NOTIFIED
+    ) == 1
+
+
+def test_failed_moderator_notification_preserves_reply_and_state(
+    db_session: Session,
+) -> None:
+    cases, service, public_id = delivery_setup(db_session)
+    cases.mark_client_request_sent(public_id, now=START)
+    cases.record_client_reply(
+        public_id,
+        external_message_id='reply-failed-notification',
+        text='Persisted answer',
+        sender_id='client-1',
+        now=START,
+    )
+    notification = start(
+        service,
+        public_id,
+        key='moderator-notification:failed',
+        delivery_type=DeliveryType.MODERATOR_NOTIFICATION,
+        recipient_id='moderator-1',
+    ).attempt
+
+    complete(
+        service,
+        key='moderator-notification:failed',
+        outcome=DeliveryStatus.FAILED,
+        error_message='simulated transport failure',
+        now=START,
+    )
+
+    assert cases.get_case(public_id).status is CaseStatus.WAITING_MODERATOR
+    assert event_count(
+        db_session, notification.case_id, CaseEventType.CLIENT_REPLY_RECEIVED
+    ) == 1
+    assert event_count(
+        db_session, notification.case_id, CaseEventType.MODERATOR_NOTIFIED
+    ) == 0
+
+
+def test_client_request_business_effect_failure_rolls_back_completion(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cases, service, public_id = delivery_setup(db_session)
+    attempt = start(service, public_id).attempt
+
+    def fail_business_effect(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError('simulated business effect failure')
+
+    monkeypatch.setattr(
+        service.case_service,
+        '_stage_client_request_sent',
+        fail_business_effect,
+    )
+
+    with pytest.raises(RuntimeError, match='business effect failure'):
+        complete(
+            service,
+            outcome=DeliveryStatus.SUCCEEDED,
+            external_message_id='external-rollback',
+            now=START,
+        )
+
+    db_session.expire_all()
+    persisted = service.delivery_repository.get_attempt('delivery-key', 1)
+    assert persisted is not None
+    assert persisted.status == DeliveryStatus.PENDING.value
+    assert cases.get_case(public_id).status is CaseStatus.NEW
+    assert event_count(
+        db_session, attempt.case_id, CaseEventType.CLIENT_REQUEST_SENT
+    ) == 0
 
 
 @pytest.mark.parametrize(
