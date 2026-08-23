@@ -1,3 +1,4 @@
+from sqlite3 import SQLITE_CONSTRAINT_UNIQUE, IntegrityError as SQLiteIntegrityError
 from typing import Any
 from uuid import uuid4
 
@@ -28,6 +29,17 @@ class DuplicateClientReplyError(CaseServiceError):
         super().__init__(
             f"Client reply external_message_id already exists: {external_message_id}"
         )
+
+
+def _is_duplicate_external_message_id(error: IntegrityError) -> bool:
+    original_error = error.orig
+    return (
+        isinstance(original_error, SQLiteIntegrityError)
+        and getattr(original_error, "sqlite_errorcode", None)
+        == SQLITE_CONSTRAINT_UNIQUE
+        and str(original_error)
+        == "UNIQUE constraint failed: client_replies.external_message_id"
+    )
 
 
 class CaseService:
@@ -126,7 +138,9 @@ class CaseService:
             return case
         except IntegrityError as error:
             self.session.rollback()
-            raise DuplicateClientReplyError(external_message_id) from error
+            if _is_duplicate_external_message_id(error):
+                raise DuplicateClientReplyError(external_message_id) from error
+            raise
         except Exception:
             self.session.rollback()
             raise

@@ -1,5 +1,6 @@
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.models import ClientReplyRecord
@@ -119,8 +120,46 @@ def test_duplicate_client_reply_has_clear_service_error_and_rolls_back(
 
     db_session.expire_all()
     assert service.get_case(second_case.public_id).status is CaseStatus.WAITING_CLIENT
+    assert (
+        db_session.scalar(
+            select(ClientReplyRecord).where(
+                ClientReplyRecord.case_id == second_case.id
+            )
+        )
+        is None
+    )
     assert CaseEventType.CLIENT_REPLY_RECEIVED not in {
         event.event_type for event in service.get_case_events(second_case.public_id)
+    }
+
+
+def test_unrelated_integrity_error_is_preserved_and_rolls_back(
+    db_session: Session,
+) -> None:
+    service = CaseService(db_session)
+    case = service.create_case("Need an update")
+    service.mark_client_request_sent(case.public_id)
+
+    with pytest.raises(IntegrityError):
+        service.record_client_reply(
+            case.public_id,
+            external_message_id="not-null-failure",
+            # Deliberately bypass the type contract to hit the DB constraint.
+            text=None,  # type: ignore[arg-type]
+        )
+
+    db_session.expire_all()
+    assert service.get_case(case.public_id).status is CaseStatus.WAITING_CLIENT
+    assert (
+        db_session.scalar(
+            select(ClientReplyRecord).where(
+                ClientReplyRecord.external_message_id == "not-null-failure"
+            )
+        )
+        is None
+    )
+    assert CaseEventType.CLIENT_REPLY_RECEIVED not in {
+        event.event_type for event in service.get_case_events(case.public_id)
     }
 
 
