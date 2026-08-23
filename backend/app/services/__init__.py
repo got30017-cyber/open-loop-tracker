@@ -7,6 +7,11 @@ from app.services.case_service import (
     DuplicateClientReplyError,
     ExternalMessageIdConflictError,
 )
+from app.services.sla_service import (
+    AcknowledgeActionResult,
+    InvalidSlaActionError,
+    SlaService,
+)
 
 __all__ = [
     "CaseNotFoundError",
@@ -14,4 +19,7 @@ __all__ = [
     "CommandResult",
     "DuplicateClientReplyError",
     "ExternalMessageIdConflictError",
+    "AcknowledgeActionResult",
+    "InvalidSlaActionError",
+    "SlaService",
 ]
