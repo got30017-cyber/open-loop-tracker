@@ -1,8 +1,8 @@
 # Open Loop Tracker
 
-Phase 6 adds a local n8n orchestration foundation and one demo Case Intake
-workflow. FastAPI remains the only boundary for case validation, business rules,
-and persistence.
+Phase 7 connects the local n8n foundation to the accepted delivery lifecycle for
+client handoff. FastAPI remains the only boundary for case state, idempotency,
+business events, and persistence.
 
 ## Run locally
 
@@ -151,6 +151,84 @@ The workflow forwards the required `original_message` and the optional accepted
 case fields. FastAPI remains authoritative for validation. A backend error stops
 the HTTP Request node and produces a failed, non-successful webhook execution;
 the workflow does not retry or create a second case.
+
+### Client handoff demo
+
+Import and activate `n8n/workflows/send-client-request.json` and
+`n8n/workflows/client-reply-intake.json` alongside **Case Intake**. Create a
+routed case and send its request through the deterministic local transport:
+
+```powershell
+$case = Invoke-RestMethod -Method Post `
+    -Uri http://localhost:8000/api/v1/cases `
+    -ContentType application/json `
+    -Body (@{
+        original_message = "Please check the order status"
+        moderator_id = "moderator-1"
+        client_contact_id = "client-1"
+    } | ConvertTo-Json)
+
+$clientDelivery = Invoke-RestMethod -Method Post `
+    -Uri http://localhost:5678/webhook/send-client-request `
+    -ContentType application/json `
+    -Body (@{ public_id = $case.public_id } | ConvertTo-Json)
+$clientDelivery
+
+Invoke-RestMethod "http://localhost:8000/api/v1/cases/$($case.public_id)"
+```
+
+The case must now be `WAITING_CLIENT`. Submit a client reply; this records the
+reply first, then sends the moderator notification through the same delivery
+lifecycle:
+
+```powershell
+$replyBody = @{
+    public_id = $case.public_id
+    external_message_id = "demo-client-reply-1"
+    text = "The order ships tomorrow"
+    sender_id = "client-1"
+} | ConvertTo-Json
+
+$reply = Invoke-RestMethod -Method Post `
+    -Uri http://localhost:5678/webhook/client-reply-intake `
+    -ContentType application/json `
+    -Body $replyBody
+$reply
+
+$events = Invoke-RestMethod `
+    "http://localhost:8000/api/v1/cases/$($case.public_id)/events"
+$events | Select-Object event_type, metadata
+```
+
+The case remains `WAITING_MODERATOR`; event history contains one each of
+`CLIENT_REQUEST_SENT`, `CLIENT_REPLY_RECEIVED`, and `MODERATOR_NOTIFIED`.
+Submitting `$replyBody` again reuses the same backend delivery identity and does
+not add another reply or moderator business event.
+
+To exercise the required client-delivery failure path, create another routed
+case and invoke `send-client-request` with `simulate_failure = $true`:
+
+```powershell
+$failedCase = Invoke-RestMethod -Method Post `
+    -Uri http://localhost:8000/api/v1/cases `
+    -ContentType application/json `
+    -Body (@{
+        original_message = "Exercise the failure path"
+        moderator_id = "moderator-1"
+        client_contact_id = "client-1"
+    } | ConvertTo-Json)
+
+Invoke-RestMethod -Method Post `
+    -Uri http://localhost:5678/webhook/send-client-request `
+    -ContentType application/json `
+    -Body (@{
+        public_id = $failedCase.public_id
+        simulate_failure = $true
+    } | ConvertTo-Json)
+```
+
+The workflow returns `delivery_status = FAILED`, the attempt records the
+failure, and the case remains `NEW`. No automatic retry is scheduled.
 
 Stop the stack without deleting either named volume:
 

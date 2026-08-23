@@ -23,7 +23,11 @@ def delivery_api(
     create_tables(engine)
     session_factory = sessionmaker(bind=engine, expire_on_commit=False)
     with session_factory() as session:
-        public_id = CaseService(session).create_case("Delivery API").public_id
+        public_id = CaseService(session).create_case(
+            "Delivery API",
+            moderator_id="moderator-1",
+            client_contact_id="client-1",
+        ).public_id
     clock = {"now": START}
 
     def override_session() -> Iterator[Session]:
@@ -150,6 +154,121 @@ def test_identity_conflict_maps_to_stable_409(
 
     assert response.status_code == 409
     assert response.json()["error"] == "delivery_identity_conflict"
+
+
+def test_client_handoff_happy_path_and_duplicate_reply(
+    delivery_api: tuple[TestClient, str, dict[str, datetime]],
+) -> None:
+    client, public_id, _clock = delivery_api
+    client_key = f'client-request:{public_id}'
+    started = client.post(
+        '/api/v1/deliveries/attempts',
+        json=start_payload(public_id, client_key),
+    ).json()
+    transported = client.post(
+        '/api/v1/demo/deliveries',
+        json={
+            'delivery_type': started['delivery_type'],
+            'recipient_id': started['recipient_id'],
+            'idempotency_key': started['idempotency_key'],
+            'attempt_number': started['attempt_number'],
+        },
+    ).json()
+    completed = client.post(
+        f'/api/v1/deliveries/{client_key}/attempts/1/result',
+        json={
+            'status': transported['status'],
+            'external_message_id': transported['external_message_id'],
+        },
+    )
+
+    assert completed.status_code == 200
+    assert client.get(f'/api/v1/cases/{public_id}').json()['status'] == (
+        'WAITING_CLIENT'
+    )
+
+    reply_payload = {
+        'external_message_id': 'client-reply-1',
+        'text': 'The client answer',
+        'sender_id': 'client-1',
+    }
+    reply_url = f'/api/v1/cases/{public_id}/client-reply'
+    first_reply = client.post(reply_url, json=reply_payload)
+    duplicate_reply = client.post(reply_url, json=reply_payload)
+    assert first_reply.json()['already_processed'] is False
+    assert duplicate_reply.json()['already_processed'] is True
+
+    notification_key = f'moderator-notification:{public_id}:client-reply-1'
+    notification_payload = {
+        'case_public_id': public_id,
+        'delivery_type': 'MODERATOR_NOTIFICATION',
+        'recipient_id': first_reply.json()['moderator_id'],
+        'idempotency_key': notification_key,
+    }
+    notification = client.post(
+        '/api/v1/deliveries/attempts', json=notification_payload
+    ).json()
+    moderator_transport = client.post(
+        '/api/v1/demo/deliveries',
+        json={
+            'delivery_type': notification['delivery_type'],
+            'recipient_id': notification['recipient_id'],
+            'idempotency_key': notification['idempotency_key'],
+            'attempt_number': notification['attempt_number'],
+        },
+    ).json()
+    client.post(
+        f'/api/v1/deliveries/{notification_key}/attempts/1/result',
+        json={
+            'status': moderator_transport['status'],
+            'external_message_id': moderator_transport['external_message_id'],
+        },
+    )
+    repeated_notification = client.post(
+        '/api/v1/deliveries/attempts', json=notification_payload
+    )
+
+    case = client.get(f'/api/v1/cases/{public_id}').json()
+    events = client.get(f'/api/v1/cases/{public_id}/events').json()
+    event_names = [event['event_type'] for event in events]
+    assert case['status'] == 'WAITING_MODERATOR'
+    assert repeated_notification.json()['delivery_completed'] is True
+    assert event_names.count('CLIENT_REQUEST_SENT') == 1
+    assert event_names.count('CLIENT_REPLY_RECEIVED') == 1
+    assert event_names.count('MODERATOR_NOTIFIED') == 1
+
+
+def test_failed_client_transport_keeps_case_new(
+    delivery_api: tuple[TestClient, str, dict[str, datetime]],
+) -> None:
+    client, public_id, _clock = delivery_api
+    key = f'client-request-failure:{public_id}'
+    attempt = client.post(
+        '/api/v1/deliveries/attempts',
+        json=start_payload(public_id, key),
+    ).json()
+    transport = client.post(
+        '/api/v1/demo/deliveries',
+        json={
+            'delivery_type': attempt['delivery_type'],
+            'recipient_id': attempt['recipient_id'],
+            'idempotency_key': attempt['idempotency_key'],
+            'attempt_number': attempt['attempt_number'],
+            'simulate_failure': True,
+        },
+    ).json()
+    completed = client.post(
+        f'/api/v1/deliveries/{key}/attempts/1/result',
+        json={
+            'status': transport['status'],
+            'error_message': transport['error_message'],
+        },
+    )
+
+    assert completed.json()['status'] == 'FAILED'
+    assert client.get(f'/api/v1/cases/{public_id}').json()['status'] == 'NEW'
+    events = client.get(f'/api/v1/cases/{public_id}/events').json()
+    assert all(event['event_type'] != 'CLIENT_REQUEST_SENT' for event in events)
 
 
 def test_retry_exhaustion_maps_to_stable_409(

@@ -1,0 +1,160 @@
+{
+  "id": "P7ClientReply001",
+  "name": "Client Reply Intake",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "client-reply-intake",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "eacdc839-77e7-4ad4-afdc-388e6b46d983",
+      "name": "Client Reply Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-720, 0],
+      "webhookId": "cf752321-3e3c-4bec-a72c-804f15fcaf6d"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BACKEND_BASE_URL + '/api/v1/cases/' + $json.body.public_id + '/client-reply' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { external_message_id: $json.body.external_message_id, text: $json.body.text, sender_id: $json.body.sender_id } }}",
+        "options": {}
+      },
+      "id": "d0e99b62-b0dc-4e4d-a2cc-04791014a926",
+      "name": "Record Client Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-480, 0],
+      "retryOnFail": false
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BACKEND_BASE_URL + '/api/v1/deliveries/attempts' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { case_public_id: $json.public_id, delivery_type: 'MODERATOR_NOTIFICATION', recipient_id: $json.moderator_id, idempotency_key: 'moderator-notification:' + $json.public_id + ':' + $('Client Reply Webhook').item.json.body.external_message_id } }}",
+        "options": {}
+      },
+      "id": "0791e94d-cf7e-4c6c-a508-b491a0f731c4",
+      "name": "Start Moderator Notification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-240, 0],
+      "retryOnFail": false
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "5032e864-fbb5-4b79-a65a-07bba4e99254",
+              "leftValue": "={{ $json.delivery_completed }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a74ebdf9-3b4a-477a-80eb-c72f40d537b0",
+      "name": "Moderator Delivery Already Complete?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BACKEND_BASE_URL + '/api/v1/demo/deliveries' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { delivery_type: $json.delivery_type, recipient_id: $json.recipient_id, idempotency_key: $json.idempotency_key, attempt_number: $json.attempt_number, simulate_failure: $('Client Reply Webhook').item.json.body.simulate_notification_failure ?? false } }}",
+        "options": {}
+      },
+      "id": "c019f9f7-dd71-4ab1-9d4f-0b3df52ecdb7",
+      "name": "Execute Local Moderator Transport",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [240, 100],
+      "retryOnFail": false
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BACKEND_BASE_URL + '/api/v1/deliveries/' + $json.idempotency_key + '/attempts/' + $json.attempt_number + '/result' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { status: $json.status, external_message_id: $json.external_message_id, error_message: $json.error_message } }}",
+        "options": {}
+      },
+      "id": "b74014b7-ece9-4185-a5eb-e1ad5e8d2577",
+      "name": "Report Moderator Delivery Result",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 100],
+      "retryOnFail": false
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { case_public_id: $json.case_public_id, case_status: $('Record Client Reply').item.json.status, reply_already_processed: $('Record Client Reply').item.json.already_processed, moderator_delivery_status: $json.status, moderator_delivery_already_processed: $json.already_processed } }}",
+        "options": {}
+      },
+      "id": "c280fdae-6bb6-4ad2-bb9c-c6bac75f2dde",
+      "name": "Return Client Reply Result",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [720, 0]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Client Reply Webhook": {
+      "main": [[{"node": "Record Client Reply", "type": "main", "index": 0}]]
+    },
+    "Record Client Reply": {
+      "main": [[{"node": "Start Moderator Notification", "type": "main", "index": 0}]]
+    },
+    "Start Moderator Notification": {
+      "main": [[{"node": "Moderator Delivery Already Complete?", "type": "main", "index": 0}]]
+    },
+    "Moderator Delivery Already Complete?": {
+      "main": [
+        [{"node": "Return Client Reply Result", "type": "main", "index": 0}],
+        [{"node": "Execute Local Moderator Transport", "type": "main", "index": 0}]
+      ]
+    },
+    "Execute Local Moderator Transport": {
+      "main": [[{"node": "Report Moderator Delivery Result", "type": "main", "index": 0}]]
+    },
+    "Report Moderator Delivery Result": {
+      "main": [[{"node": "Return Client Reply Result", "type": "main", "index": 0}]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "4664362d-3a8f-4b29-be9f-b0576897d48b",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}

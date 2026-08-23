@@ -122,17 +122,12 @@ class CaseService:
             case = self._require_case(public_id)
             if case.status is CaseStatus.WAITING_CLIENT:
                 return CommandResult(case=case, already_processed=True)
-            self._apply_transition(case, CaseStatus.WAITING_CLIENT)
             command_time = as_naive_utc(now) if now is not None else utc_now()
-            case.updated_at = command_time
-            case.client_deadline = command_time + timedelta(
-                minutes=self.settings.client_reminder_1_minutes
-            )
-            case.moderator_deadline = None
-            self.repository.add_event(
-                self._event(
-                    case, CaseEventType.CLIENT_REQUEST_SENT, actor_type, actor_id
-                )
+            self._stage_client_request_sent(
+                case,
+                command_time=command_time,
+                actor_type=actor_type,
+                actor_id=actor_id,
             )
             self.session.commit()
             return CommandResult(case=case, already_processed=False)
@@ -319,6 +314,7 @@ class CaseService:
         actor_type: str | None = None,
         actor_id: str | None = None,
         metadata_json: dict[str, Any] | None = None,
+        deduplication_key: str | None = None,
     ) -> CaseEventRecord:
         return CaseEventRecord(
             case_id=case.id,
@@ -326,6 +322,34 @@ class CaseService:
             actor_type=actor_type,
             actor_id=actor_id,
             metadata_json=metadata_json,
+            deduplication_key=deduplication_key,
+        )
+
+    def _stage_client_request_sent(
+        self,
+        case: CaseRecord,
+        *,
+        command_time: datetime,
+        actor_type: str | None = None,
+        actor_id: str | None = None,
+        metadata_json: dict[str, Any] | None = None,
+        deduplication_key: str | None = None,
+    ) -> None:
+        self._apply_transition(case, CaseStatus.WAITING_CLIENT)
+        case.updated_at = command_time
+        case.client_deadline = command_time + timedelta(
+            minutes=self.settings.client_reminder_1_minutes
+        )
+        case.moderator_deadline = None
+        self.repository.add_event(
+            self._event(
+                case,
+                CaseEventType.CLIENT_REQUEST_SENT,
+                actor_type,
+                actor_id,
+                metadata_json=metadata_json,
+                deduplication_key=deduplication_key,
+            )
         )
 
     @staticmethod
