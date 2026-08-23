@@ -1,5 +1,5 @@
 services:
-  api:
+  backend:
     build:
       context: ./backend
     environment:
@@ -9,6 +9,45 @@ services:
       - "8000:8000"
     volumes:
       - open_loop_data:/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://localhost:8000/health')
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:2.35.7
+    environment:
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: !!str false
+      BACKEND_BASE_URL: ${BACKEND_BASE_URL:-http://backend:8000}
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-UTC}
+      TZ: ${GENERIC_TIMEZONE:-UTC}
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+      N8N_PERSONALIZATION_ENABLED: "false"
+      N8N_SECURE_COOKIE: "false"
+      N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
+    ports:
+      - "5678:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:5678/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
 volumes:
   open_loop_data:
+  n8n_data:

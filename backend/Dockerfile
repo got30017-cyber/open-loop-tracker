@@ -12,4 +12,4 @@ COPY app ./app
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "python -c 'from app.db import create_tables, engine; create_tables(engine)' && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]
