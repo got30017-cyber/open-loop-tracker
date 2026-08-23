@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, select, update
 from sqlalchemy.orm import Session
 
 from app.db.models import DeliveryAttemptRecord
@@ -36,6 +36,33 @@ class DeliveryRepository:
                 DeliveryAttemptRecord.attempt_number == attempt_number,
             )
         )
+
+    def transition_pending_attempt(
+        self,
+        *,
+        idempotency_key: str,
+        attempt_number: int,
+        status: DeliveryStatus,
+        completed_at: datetime,
+        external_message_id: str | None,
+        error_message: str | None,
+    ) -> bool:
+        result = self.session.execute(
+            update(DeliveryAttemptRecord)
+            .where(
+                DeliveryAttemptRecord.idempotency_key == idempotency_key,
+                DeliveryAttemptRecord.attempt_number == attempt_number,
+                DeliveryAttemptRecord.status == DeliveryStatus.PENDING.value,
+            )
+            .values(
+                status=status.value,
+                completed_at=completed_at,
+                external_message_id=external_message_id,
+                error_message=error_message,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        return result.rowcount == 1
 
     def get_retryable_latest_attempts(
         self,

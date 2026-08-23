@@ -229,6 +229,213 @@ def test_different_external_message_id_on_success_retry_is_conflict(
         )
 
 
+def install_competing_completion(
+    *,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    service: DeliveryService,
+    winner: DeliveryStatus,
+    completed_at: datetime,
+    external_message_id: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    original_transition = service.delivery_repository.transition_pending_attempt
+    attempt = service.delivery_repository.get_attempt("delivery-key", 1)
+    assert attempt is not None
+
+    def winner_commits_before_compare_and_set(**_requested: object) -> bool:
+        transitioned = original_transition(
+            idempotency_key="delivery-key",
+            attempt_number=1,
+            status=winner,
+            completed_at=completed_at,
+            external_message_id=(
+                external_message_id
+                if winner is DeliveryStatus.SUCCEEDED
+                else None
+            ),
+            error_message=(
+                error_message if winner is DeliveryStatus.FAILED else None
+            ),
+        )
+        assert transitioned is True
+        losing_transition = original_transition(  # type: ignore[arg-type]
+            **_requested
+        )
+        assert losing_transition is False
+        if winner is DeliveryStatus.FAILED:
+            service.case_repository.add_event(
+                service._delivery_event(
+                    case_id=attempt.case_id,
+                    event_type=CaseEventType.DELIVERY_FAILED,
+                    delivery_type=DeliveryType.CLIENT_REQUEST,
+                    idempotency_key="delivery-key",
+                    attempt_number=1,
+                    created_at=completed_at,
+                    event_suffix="failed",
+                )
+            )
+        db_session.commit()
+        db_session.expire_all()
+        return losing_transition
+
+    monkeypatch.setattr(
+        service.delivery_repository,
+        "transition_pending_attempt",
+        winner_commits_before_compare_and_set,
+    )
+
+
+def test_competing_equivalent_success_is_idempotent_without_timestamp_rewrite(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _cases, service, public_id = delivery_setup(db_session)
+    start(service, public_id)
+    winning_time = START + timedelta(minutes=1)
+    install_competing_completion(
+        db_session=db_session,
+        monkeypatch=monkeypatch,
+        service=service,
+        winner=DeliveryStatus.SUCCEEDED,
+        completed_at=winning_time,
+        external_message_id="external-1",
+    )
+
+    result = complete(
+        service,
+        outcome=DeliveryStatus.SUCCEEDED,
+        external_message_id="external-1",
+        now=START + timedelta(minutes=2),
+    )
+
+    assert result.already_processed is True
+    assert result.attempt.status == DeliveryStatus.SUCCEEDED.value
+    assert result.attempt.completed_at == winning_time
+    assert result.attempt.external_message_id == "external-1"
+
+
+def test_success_winner_is_not_overwritten_by_competing_failure(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cases, service, public_id = delivery_setup(db_session)
+    attempt = start(service, public_id).attempt
+    winning_time = START + timedelta(minutes=1)
+    install_competing_completion(
+        db_session=db_session,
+        monkeypatch=monkeypatch,
+        service=service,
+        winner=DeliveryStatus.SUCCEEDED,
+        completed_at=winning_time,
+        external_message_id="external-1",
+    )
+
+    with pytest.raises(DeliveryAttemptConflictError):
+        complete(
+            service,
+            outcome=DeliveryStatus.FAILED,
+            error_message="timeout",
+            now=START + timedelta(minutes=2),
+        )
+
+    persisted = service.delivery_repository.get_attempt("delivery-key", 1)
+    assert persisted is not None
+    assert persisted.status == DeliveryStatus.SUCCEEDED.value
+    assert persisted.completed_at == winning_time
+    assert event_count(
+        db_session, attempt.case_id, CaseEventType.DELIVERY_FAILED
+    ) == 0
+    assert cases.get_case(public_id).status is CaseStatus.NEW
+
+
+def test_failure_winner_is_immutable_and_writes_one_failure_event(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _cases, service, public_id = delivery_setup(db_session)
+    attempt = start(service, public_id).attempt
+    winning_time = START + timedelta(minutes=1)
+    install_competing_completion(
+        db_session=db_session,
+        monkeypatch=monkeypatch,
+        service=service,
+        winner=DeliveryStatus.FAILED,
+        completed_at=winning_time,
+        error_message="winner timeout",
+    )
+
+    with pytest.raises(DeliveryAttemptConflictError):
+        complete(
+            service,
+            outcome=DeliveryStatus.SUCCEEDED,
+            external_message_id="external-loser",
+            now=START + timedelta(minutes=2),
+        )
+
+    persisted = service.delivery_repository.get_attempt("delivery-key", 1)
+    assert persisted is not None
+    assert persisted.status == DeliveryStatus.FAILED.value
+    assert persisted.completed_at == winning_time
+    assert persisted.error_message == "winner timeout"
+    assert event_count(
+        db_session, attempt.case_id, CaseEventType.DELIVERY_FAILED
+    ) == 1
+
+
+def test_competing_equivalent_failure_is_idempotent_with_one_event(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _cases, service, public_id = delivery_setup(db_session)
+    attempt = start(service, public_id).attempt
+    winning_time = START + timedelta(minutes=1)
+    install_competing_completion(
+        db_session=db_session,
+        monkeypatch=monkeypatch,
+        service=service,
+        winner=DeliveryStatus.FAILED,
+        completed_at=winning_time,
+        error_message="timeout",
+    )
+
+    result = complete(
+        service,
+        outcome=DeliveryStatus.FAILED,
+        error_message="timeout",
+        now=START + timedelta(minutes=2),
+    )
+
+    assert result.already_processed is True
+    assert result.attempt.completed_at == winning_time
+    assert event_count(
+        db_session, attempt.case_id, CaseEventType.DELIVERY_FAILED
+    ) == 1
+
+
+def test_competing_success_with_different_external_id_is_conflict(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _cases, service, public_id = delivery_setup(db_session)
+    start(service, public_id)
+    install_competing_completion(
+        db_session=db_session,
+        monkeypatch=monkeypatch,
+        service=service,
+        winner=DeliveryStatus.SUCCEEDED,
+        completed_at=START + timedelta(minutes=1),
+        external_message_id="winner-external-id",
+    )
+
+    with pytest.raises(DeliveryAttemptConflictError):
+        complete(
+            service,
+            outcome=DeliveryStatus.SUCCEEDED,
+            external_message_id="loser-external-id",
+            now=START + timedelta(minutes=2),
+        )
+
+    persisted = service.delivery_repository.get_attempt("delivery-key", 1)
+    assert persisted is not None
+    assert persisted.external_message_id == "winner-external-id"
+
+
 def test_retry_timing_reservation_and_event_are_idempotent(
     db_session: Session,
 ) -> None:

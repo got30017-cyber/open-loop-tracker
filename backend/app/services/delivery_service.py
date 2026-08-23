@@ -244,14 +244,38 @@ class DeliveryService:
                 )
 
             completed_at = as_naive_utc(now) if now is not None else utc_now()
-            attempt.status = outcome.value
-            attempt.completed_at = completed_at
-            if outcome is DeliveryStatus.SUCCEEDED:
-                attempt.external_message_id = external_message_id
-                attempt.error_message = None
-            else:
-                attempt.external_message_id = None
-                attempt.error_message = error_message
+            transitioned = self.delivery_repository.transition_pending_attempt(
+                idempotency_key=idempotency_key,
+                attempt_number=attempt_number,
+                status=outcome,
+                completed_at=completed_at,
+                external_message_id=(
+                    external_message_id
+                    if outcome is DeliveryStatus.SUCCEEDED
+                    else None
+                ),
+                error_message=(
+                    error_message if outcome is DeliveryStatus.FAILED else None
+                ),
+            )
+            if not transitioned:
+                self.session.rollback()
+                persisted = self.delivery_repository.get_attempt(
+                    idempotency_key, attempt_number
+                )
+                if persisted is None:
+                    raise DeliveryAttemptNotFoundError(
+                        idempotency_key, attempt_number
+                    )
+                return self._completed_result(
+                    persisted,
+                    persisted.case.public_id,
+                    outcome,
+                    external_message_id,
+                )
+
+            self.session.refresh(attempt)
+            if outcome is DeliveryStatus.FAILED:
                 self.case_repository.add_event(
                     self._delivery_event(
                         case_id=attempt.case_id,
