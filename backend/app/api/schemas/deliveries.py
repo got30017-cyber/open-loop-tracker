@@ -12,6 +12,7 @@ class StartDeliveryAttemptRequest(BaseModel):
     delivery_type: DeliveryType
     recipient_id: str = Field(min_length=1)
     idempotency_key: str = Field(min_length=1)
+    allow_retry: bool = True
 
 
 class CompleteDeliveryAttemptRequest(BaseModel):

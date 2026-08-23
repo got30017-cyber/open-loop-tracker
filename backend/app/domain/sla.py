@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
 
+from app.domain.delivery import DeliveryType
 from app.domain.enums import CaseStatus
 
 
@@ -25,6 +26,9 @@ class DueAction:
     level: int | None
     recipient_role: RecipientRole
     due_at: datetime
+    delivery_type: DeliveryType | None = None
+    recipient_id: str | None = None
+    delivery_idempotency_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

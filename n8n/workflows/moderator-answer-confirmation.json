@@ -1,0 +1,63 @@
+{
+  "id": "P8ModeratorAns01",
+  "name": "Moderator Answer Confirmation",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "moderator-answer-confirmation",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "f2920945-0636-45f8-96b3-ab1b31595497",
+      "name": "Moderator Answer Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-280, 0],
+      "webhookId": "d30f0bda-4bf7-4282-9339-b4e1826b19e4"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BACKEND_BASE_URL + '/api/v1/cases/' + $json.body.public_id + '/user-answered' }}",
+        "options": {}
+      },
+      "id": "4bec98cb-ded7-4070-a4fa-7d19a79f5959",
+      "name": "Confirm User Answered",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-40, 0],
+      "retryOnFail": false
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { public_id: $json.public_id, status: $json.status, already_processed: $json.already_processed } }}",
+        "options": {}
+      },
+      "id": "a59add8c-a2bd-40ec-b96d-0894af4844a7",
+      "name": "Return Closed Case",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [200, 0]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Moderator Answer Webhook": {
+      "main": [[{"node": "Confirm User Answered", "type": "main", "index": 0}]]
+    },
+    "Confirm User Answered": {
+      "main": [[{"node": "Return Closed Case", "type": "main", "index": 0}]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "bfc38f38-ed68-483b-93f0-b6949608caa8",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}

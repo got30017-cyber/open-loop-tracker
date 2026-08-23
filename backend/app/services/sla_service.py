@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from sqlite3 import SQLITE_CONSTRAINT_UNIQUE, IntegrityError as SQLiteIntegrityError
 from typing import Any
@@ -10,6 +10,7 @@ from app.core.config import Settings, get_settings
 from app.db.models import CaseEventRecord, CaseRecord
 from app.db.models.common import as_naive_utc, utc_now
 from app.db.repositories import CaseRepository
+from app.domain.delivery import DeliveryType
 from app.domain.enums import CaseEventType, CaseStatus
 from app.domain.sla import (
     ActionIdentity,
@@ -92,8 +93,40 @@ class SlaService:
                 acknowledged=self._acknowledged_actions(events),
             )
             if action is not None:
-                actions.append(action)
+                actions.append(self._with_delivery_identity(case, action))
         return actions
+
+    @staticmethod
+    def _with_delivery_identity(
+        case: CaseRecord, action: DueAction
+    ) -> DueAction:
+        if action.action_type is SlaActionType.REMIND_CLIENT:
+            delivery_type = DeliveryType.CLIENT_REMINDER
+            recipient_id = case.client_contact_id or action.recipient_role.value
+            idempotency_key = (
+                f"client-reminder:{case.public_id}:{action.level}"
+            )
+        elif action.action_type is SlaActionType.REMIND_MODERATOR:
+            delivery_type = DeliveryType.MODERATOR_REMINDER
+            recipient_id = case.moderator_id or action.recipient_role.value
+            idempotency_key = (
+                f"moderator-reminder:{case.public_id}:{action.level}"
+            )
+        else:
+            delivery_type = DeliveryType.ESCALATION
+            recipient_id = action.recipient_role.value
+            wait_type = (
+                "client"
+                if action.action_type is SlaActionType.ESCALATE_CLIENT_WAIT
+                else "moderator"
+            )
+            idempotency_key = f"escalation:{case.public_id}:{wait_type}"
+        return replace(
+            action,
+            delivery_type=delivery_type,
+            recipient_id=recipient_id,
+            delivery_idempotency_key=idempotency_key,
+        )
 
     def acknowledge_action(
         self,

@@ -59,6 +59,9 @@ def test_due_and_ack_endpoints_are_deterministic_and_idempotent(
             "level": 1,
             "recipient_role": "client",
             "due_at": "2026-08-23T12:00:00Z",
+            "delivery_type": "CLIENT_REMINDER",
+            "recipient_id": "client",
+            "delivery_idempotency_key": f"client-reminder:{public_id}:1",
         }
     ]
     assert first_due.status_code == 200

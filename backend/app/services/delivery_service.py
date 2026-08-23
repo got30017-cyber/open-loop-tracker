@@ -123,6 +123,7 @@ class DeliveryService:
         delivery_type: DeliveryType,
         recipient_id: str,
         idempotency_key: str,
+        allow_retry: bool = True,
         now: datetime | None = None,
     ) -> DeliveryAttemptResult:
         attempt_number: int | None = None
@@ -156,6 +157,8 @@ class DeliveryService:
                     raise DeliveryAttemptConflictError(
                         idempotency_key, latest.attempt_number
                     )
+                if not allow_retry:
+                    return self._result(case_public_id, latest, True)
                 if latest.attempt_number >= self.settings.delivery_max_attempts:
                     raise DeliveryRetriesExhaustedError(idempotency_key)
                 if latest.completed_at is None:

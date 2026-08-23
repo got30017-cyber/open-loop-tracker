@@ -29,6 +29,7 @@ def start_delivery_attempt(
         delivery_type=request.delivery_type,
         recipient_id=request.recipient_id,
         idempotency_key=request.idempotency_key,
+        allow_retry=request.allow_retry,
         now=now,
     )
     return DeliveryAttemptResponse.from_result(result)

@@ -122,6 +122,29 @@ def test_moderator_sla_has_no_action_before_first_boundary(
     assert sla.get_due_actions(START + timedelta(hours=1, minutes=29)) == []
 
 
+def test_due_actions_expose_backend_owned_delivery_identity_and_routing(
+    db_session: Session,
+) -> None:
+    cases, sla, public_id = waiting_moderator(db_session)
+    cases.reassign_moderator(public_id, "moderator-current")
+
+    reminder = sla.get_due_actions(
+        START + timedelta(hours=1, minutes=30)
+    )[0]
+    assert reminder.delivery_type.value == "MODERATOR_REMINDER"
+    assert reminder.recipient_id == "moderator-current"
+    assert reminder.delivery_idempotency_key == (
+        f"moderator-reminder:{public_id}:1"
+    )
+
+    escalation = sla.get_due_actions(START + timedelta(hours=5))[0]
+    assert escalation.delivery_type.value == "ESCALATION"
+    assert escalation.recipient_id == "operations"
+    assert escalation.delivery_idempotency_key == (
+        f"escalation:{public_id}:moderator"
+    )
+
+
 def test_acknowledgements_are_idempotent_and_preserve_waiting_state(
     db_session: Session,
 ) -> None:

@@ -230,6 +230,115 @@ Invoke-RestMethod -Method Post `
 The workflow returns `delivery_status = FAILED`, the attempt records the
 failure, and the case remains `NEW`. No automatic retry is scheduled.
 
+### SLA watchdog and moderator closure demo
+
+Import and activate `n8n/workflows/sla-watchdog.json` and
+`n8n/workflows/moderator-answer-confirmation.json`. The watchdog polls once per
+minute for local demonstration; that interval is orchestration configuration,
+not a business SLA. It also has a Manual Trigger for repeat/duplicate checks.
+
+To avoid waiting for the normal 2-hour and 24-hour thresholds, copy
+`.env.example` to `.env` and use these demo-only values before starting Compose:
+
+```dotenv
+CLIENT_REMINDER_1_MINUTES=1
+CLIENT_REMINDER_2_MINUTES=2
+CLIENT_ESCALATION_MINUTES=3
+MODERATOR_REMINDER_1_MINUTES=1
+MODERATOR_REMINDER_2_MINUTES=2
+MODERATOR_ESCALATION_MINUTES=3
+SLA_DEMO_FORCE_FAILURE=false
+```
+
+Defaults remain `120/360/1440` minutes for client waits and `30/120/240`
+minutes for moderator waits. Create a routed case and move it to
+`WAITING_CLIENT` through the accepted Phase 7 workflow:
+
+```powershell
+$slaClientCase = Invoke-RestMethod -Method Post `
+    -Uri http://localhost:8000/api/v1/cases `
+    -ContentType application/json `
+    -Body (@{
+        original_message = "SLA client demo"
+        moderator_id = "moderator-sla"
+        client_contact_id = "client-sla"
+    } | ConvertTo-Json)
+
+Invoke-RestMethod -Method Post `
+    -Uri http://localhost:5678/webhook/send-client-request `
+    -ContentType application/json `
+    -Body (@{ public_id = $slaClientCase.public_id } | ConvertTo-Json)
+
+Start-Sleep -Seconds 70
+Invoke-RestMethod `
+    "http://localhost:8000/api/v1/cases/$($slaClientCase.public_id)/events"
+```
+
+The scheduled watchdog sends and acknowledges client reminder level 1. Execute
+**SLA Watchdog** manually twice in n8n; the same level is not delivered or
+acknowledged again. Leave this case waiting for three demo minutes to observe
+one `CASE_ESCALATED`; it remains `WAITING_CLIENT`.
+
+For the moderator path, create another case, send it to the client, then submit
+a reply. After one demo minute the watchdog routes the reminder using the
+current backend `moderator_id`:
+
+```powershell
+$slaModeratorCase = Invoke-RestMethod -Method Post `
+    -Uri http://localhost:8000/api/v1/cases `
+    -ContentType application/json `
+    -Body (@{
+        original_message = "SLA moderator demo"
+        moderator_id = "moderator-current"
+        client_contact_id = "client-moderator-demo"
+    } | ConvertTo-Json)
+
+Invoke-RestMethod -Method Post `
+    -Uri http://localhost:5678/webhook/send-client-request `
+    -ContentType application/json `
+    -Body (@{ public_id = $slaModeratorCase.public_id } | ConvertTo-Json)
+
+Invoke-RestMethod -Method Post `
+    -Uri http://localhost:5678/webhook/client-reply-intake `
+    -ContentType application/json `
+    -Body (@{
+        public_id = $slaModeratorCase.public_id
+        external_message_id = "sla-moderator-reply-1"
+        text = "Moderator can answer now"
+        sender_id = "client-moderator-demo"
+    } | ConvertTo-Json)
+
+Start-Sleep -Seconds 70
+Invoke-RestMethod `
+    "http://localhost:8000/api/v1/cases/$($slaModeratorCase.public_id)/events"
+```
+
+Confirm the original user was answered, then repeat the same request to verify
+idempotent closure:
+
+```powershell
+$closeBody = @{ public_id = $slaModeratorCase.public_id } | ConvertTo-Json
+Invoke-RestMethod -Method Post `
+    -Uri http://localhost:5678/webhook/moderator-answer-confirmation `
+    -ContentType application/json -Body $closeBody
+Invoke-RestMethod -Method Post `
+    -Uri http://localhost:5678/webhook/moderator-answer-confirmation `
+    -ContentType application/json -Body $closeBody
+Invoke-RestMethod http://localhost:8000/api/v1/actions/due
+```
+
+The first response is `CLOSED` with `already_processed=false`; the second is
+`CLOSED` with `already_processed=true`. The closed case produces no due action.
+
+For a failure-only smoke test, set `SLA_DEMO_FORCE_FAILURE=true`, recreate n8n
+with `docker compose up -d --force-recreate n8n`, and use a fresh due case. The
+attempt becomes `FAILED`, no SLA acknowledgement event is written, and later
+watchdog polls reuse the failed attempt without creating Phase 9 retries. Reset
+the flag to `false` afterward and run
+`docker compose up -d --force-recreate n8n` again so the container reloads the
+environment. A subsequent `docker compose restart n8n` verifies that the
+published schedule and workflows persist in `n8n_data`.
+
 Stop the stack without deleting either named volume:
 
 ```powershell

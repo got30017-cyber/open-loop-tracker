@@ -57,6 +57,7 @@ def start(
     key: str = "delivery-key",
     delivery_type: DeliveryType = DeliveryType.CLIENT_REQUEST,
     recipient_id: str = "client-1",
+    allow_retry: bool = True,
     now: datetime = START,
 ):
     return service.start_delivery_attempt(
@@ -64,6 +65,7 @@ def start(
         delivery_type=delivery_type,
         recipient_id=recipient_id,
         idempotency_key=key,
+        allow_retry=allow_retry,
         now=now,
     )
 
@@ -519,6 +521,33 @@ def test_success_stops_new_attempts(db_session: Session) -> None:
     assert result.already_processed is True
     assert result.delivery_completed is True
     assert result.attempt.id == first.id
+    assert len(service.delivery_repository.get_attempts("delivery-key")) == 1
+
+
+def test_retry_can_be_disabled_for_watchdog_orchestration(
+    db_session: Session,
+) -> None:
+    _cases, service, public_id = delivery_setup(
+        db_session, configured=settings(delivery_retry_delay_minutes=0)
+    )
+    first = start(service, public_id).attempt
+    complete(
+        service,
+        outcome=DeliveryStatus.FAILED,
+        error_message="transport failed",
+        now=START,
+    )
+
+    repeated = start(
+        service,
+        public_id,
+        allow_retry=False,
+        now=START + timedelta(days=1),
+    )
+
+    assert repeated.already_processed is True
+    assert repeated.attempt.id == first.id
+    assert repeated.attempt.status == DeliveryStatus.FAILED.value
     assert len(service.delivery_repository.get_attempts("delivery-key")) == 1
 
 
