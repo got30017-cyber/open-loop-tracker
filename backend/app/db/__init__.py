@@ -1,5 +1,17 @@
-"""Database infrastructure foundation."""
+"""Database infrastructure."""
 
-from app.db.database import Base, SessionLocal, engine
+from app.db.database import (
+    Base,
+    SessionLocal,
+    create_database_engine,
+    create_tables,
+    engine,
+)
 
-__all__ = ["Base", "SessionLocal", "engine"]
+__all__ = [
+    "Base",
+    "SessionLocal",
+    "create_database_engine",
+    "create_tables",
+    "engine",
+]
