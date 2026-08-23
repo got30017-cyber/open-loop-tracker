@@ -1,8 +1,9 @@
 # Open Loop Tracker
 
-Phase 2 provides the FastAPI application skeleton, infrastructure-independent case
-state machine, SQLite persistence records, and an injected-session application
-service. Operational integrations and business REST endpoints remain deferred.
+Phase 3 provides the FastAPI application, infrastructure-independent case state
+machine, SQLite persistence, an injected-session application service, and a
+versioned REST API with explicit idempotent command semantics. Operational
+integrations remain deferred.
 
 ## Run locally
 
@@ -27,6 +28,22 @@ python -c "from app.db import create_tables, engine; create_tables(engine)"
 `CaseService` receives a SQLAlchemy `Session` from its caller. Each mutating command
 commits its case changes, history events, and related rows together, and rolls the
 whole transaction back on failure.
+
+## REST API
+
+Case operations are available under `/api/v1/cases`:
+
+- `POST /api/v1/cases`
+- `GET /api/v1/cases/{public_id}`
+- `POST /api/v1/cases/{public_id}/send-to-client`
+- `POST /api/v1/cases/{public_id}/client-reply`
+- `POST /api/v1/cases/{public_id}/user-answered`
+- `POST /api/v1/cases/{public_id}/cancel`
+- `POST /api/v1/cases/{public_id}/reassign`
+- `GET /api/v1/cases/{public_id}/events`
+
+Mutation responses include `already_processed` so callers can safely interpret
+supported command retries. The API does not perform external message delivery.
 
 ## Run tests
 

@@ -25,6 +25,13 @@ class CaseRepository:
     def add_client_reply(self, reply: ClientReplyRecord) -> None:
         self.session.add(reply)
 
+    def get_client_reply(self, external_message_id: str) -> ClientReplyRecord | None:
+        return self.session.scalar(
+            select(ClientReplyRecord).where(
+                ClientReplyRecord.external_message_id == external_message_id
+            )
+        )
+
     def get_case_events(self, case_id: int) -> list[CaseEventRecord]:
         return list(
             self.session.scalars(

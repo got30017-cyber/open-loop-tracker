@@ -52,15 +52,17 @@ def test_invalid_mark_request_does_not_mutate_persisted_state(
     service = CaseService(db_session)
     case = service.create_case("Need an update")
     service.mark_client_request_sent(case.public_id)
+    service.record_client_reply(case.public_id, "invalid-mark-reply", "Details")
 
     with pytest.raises(InvalidStateTransition):
         service.mark_client_request_sent(case.public_id)
 
     db_session.expire_all()
-    assert service.get_case(case.public_id).status is CaseStatus.WAITING_CLIENT
+    assert service.get_case(case.public_id).status is CaseStatus.WAITING_MODERATOR
     assert [event.event_type for event in service.get_case_events(case.public_id)] == [
         CaseEventType.CASE_CREATED,
         CaseEventType.CLIENT_REQUEST_SENT,
+        CaseEventType.CLIENT_REPLY_RECEIVED,
     ]
 
 
