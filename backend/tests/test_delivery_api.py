@@ -47,7 +47,9 @@ def delivery_api(
         engine.dispose()
 
 
-def start_payload(public_id: str, key: str = "client-request-key") -> dict[str, str]:
+def start_payload(
+    public_id: str, key: str = "client-request-key"
+) -> dict[str, object]:
     return {
         "case_public_id": public_id,
         "delivery_type": "CLIENT_REQUEST",
@@ -269,6 +271,27 @@ def test_failed_client_transport_keeps_case_new(
     assert client.get(f'/api/v1/cases/{public_id}').json()['status'] == 'NEW'
     events = client.get(f'/api/v1/cases/{public_id}/events').json()
     assert all(event['event_type'] != 'CLIENT_REQUEST_SENT' for event in events)
+
+
+def test_start_attempt_can_reuse_failure_without_scheduling_retry(
+    delivery_api: tuple[TestClient, str, dict[str, datetime]],
+) -> None:
+    client, public_id, clock = delivery_api
+    payload = start_payload(public_id, "watchdog-no-retry")
+    payload["allow_retry"] = False
+    client.post("/api/v1/deliveries/attempts", json=payload)
+    client.post(
+        "/api/v1/deliveries/watchdog-no-retry/attempts/1/result",
+        json={"status": "FAILED", "error_message": "transport failed"},
+    )
+    clock["now"] += timedelta(days=1)
+
+    repeated = client.post("/api/v1/deliveries/attempts", json=payload)
+
+    assert repeated.status_code == 200
+    assert repeated.json()["attempt_number"] == 1
+    assert repeated.json()["status"] == "FAILED"
+    assert repeated.json()["already_processed"] is True
 
 
 def test_retry_exhaustion_maps_to_stable_409(

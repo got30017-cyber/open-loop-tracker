@@ -3,6 +3,7 @@ from datetime import datetime
 from pydantic import BaseModel
 
 from app.api.schemas.cases import as_utc
+from app.domain.delivery import DeliveryType
 from app.domain.sla import DueAction, RecipientRole, SlaActionType
 from app.services import AcknowledgeActionResult
 
@@ -18,15 +19,27 @@ class DueActionResponse(BaseModel):
     level: int | None
     recipient_role: RecipientRole
     due_at: datetime
+    delivery_type: DeliveryType
+    recipient_id: str
+    delivery_idempotency_key: str
 
     @classmethod
     def from_action(cls, action: DueAction) -> "DueActionResponse":
+        if (
+            action.delivery_type is None
+            or action.recipient_id is None
+            or action.delivery_idempotency_key is None
+        ):
+            raise ValueError("Due action is missing delivery routing")
         return cls(
             case_public_id=action.case_public_id,
             action_type=action.action_type,
             level=action.level,
             recipient_role=action.recipient_role,
             due_at=as_utc(action.due_at),
+            delivery_type=action.delivery_type,
+            recipient_id=action.recipient_id,
+            delivery_idempotency_key=action.delivery_idempotency_key,
         )
 
 
