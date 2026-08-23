@@ -35,5 +35,6 @@ class DeliveryAttemptRecord(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=False), default=utc_now, nullable=False
     )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
 
     case: Mapped["CaseRecord"] = relationship(back_populates="delivery_attempts")

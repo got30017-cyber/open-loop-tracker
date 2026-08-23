@@ -14,6 +14,8 @@ class Settings:
     moderator_reminder_1_minutes: int = 30
     moderator_reminder_2_minutes: int = 120
     moderator_escalation_minutes: int = 240
+    delivery_max_attempts: int = 3
+    delivery_retry_delay_minutes: int = 5
 
     def __post_init__(self) -> None:
         client_thresholds = (
@@ -39,6 +41,10 @@ class Settings:
             raise ValueError(
                 "Moderator SLA thresholds must be positive and strictly increasing"
             )
+        if self.delivery_max_attempts < 1:
+            raise ValueError("Delivery max attempts must be at least 1")
+        if self.delivery_retry_delay_minutes < 0:
+            raise ValueError("Delivery retry delay must not be negative")
 
 
 def _environment_int(name: str, default: int) -> int:
@@ -75,5 +81,9 @@ def get_settings() -> Settings:
         ),
         moderator_escalation_minutes=_environment_int(
             "MODERATOR_ESCALATION_MINUTES", 240
+        ),
+        delivery_max_attempts=_environment_int("DELIVERY_MAX_ATTEMPTS", 3),
+        delivery_retry_delay_minutes=_environment_int(
+            "DELIVERY_RETRY_DELAY_MINUTES", 5
         ),
     )

@@ -1,8 +1,8 @@
 # Open Loop Tracker
 
-Phase 4 adds a deterministic SLA decision engine and explicit, idempotent action
-acknowledgements to the accepted case API. Operational integrations remain
-deferred.
+Phase 5 adds delivery-attempt tracking and deterministic fixed-delay retry
+decisions to the accepted case and SLA APIs. External delivery integrations
+remain deferred.
 
 ## Run locally
 
@@ -44,6 +44,11 @@ wait. Later thresholds are derived from that baseline. Client deadlines start on
 `NEW -> WAITING_CLIENT`; client reply clears that deadline and starts the
 moderator deadline; close or cancellation clears both.
 
+Delivery retries default to 3 total attempts with a 5-minute fixed delay. Set
+`DELIVERY_MAX_ATTEMPTS` and `DELIVERY_RETRY_DELAY_MINUTES` to override the policy.
+Retry eligibility is derived from the previous failed attempt's `completed_at`;
+the backend reserves and tracks attempts but never executes external delivery.
+
 ## REST API
 
 Case operations are available under `/api/v1/cases`:
@@ -58,6 +63,9 @@ Case operations are available under `/api/v1/cases`:
 - `GET /api/v1/cases/{public_id}/events`
 - `GET /api/v1/actions/due`
 - `POST /api/v1/actions/{case_public_id}/ack`
+- `POST /api/v1/deliveries/attempts`
+- `POST /api/v1/deliveries/{idempotency_key}/attempts/{attempt_number}/result`
+- `GET /api/v1/deliveries/retryable`
 
 Mutation responses include `already_processed` so callers can safely interpret
 supported command retries. The API does not perform external message delivery.
@@ -65,6 +73,9 @@ The due-action endpoint is read-only and returns only the highest reached,
 unacknowledged threshold per active case. The acknowledgement endpoint records a
 reminder or escalation event only after external execution succeeds; it does not
 change case state.
+Delivery start and result commands are idempotent. Failed attempts and reserved
+retries write `DELIVERY_FAILED` and `DELIVERY_RETRIED` events atomically with the
+attempt mutation. The retryable endpoint is read-only.
 
 ## Run tests
 
