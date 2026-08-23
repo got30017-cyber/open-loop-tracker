@@ -2,12 +2,19 @@ from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.api.schemas.cases import as_utc
 from app.domain.state_machine import InvalidStateTransition
 from app.services import (
     CaseNotFoundError,
+    DeliveryAttemptConflictError,
+    DeliveryAttemptNotFoundError,
+    DeliveryIdentityConflictError,
+    DeliveryRetriesExhaustedError,
     DuplicateClientReplyError,
     ExternalMessageIdConflictError,
+    InvalidDeliveryOutcomeError,
     InvalidSlaActionError,
+    RetryNotDueError,
 )
 
 
@@ -77,4 +84,67 @@ def register_exception_handlers(application: FastAPI) -> None:
                 "error": "persistence_error",
                 "message": "A persistence operation failed",
             },
+        )
+
+    @application.exception_handler(DeliveryAttemptNotFoundError)
+    async def delivery_attempt_not_found(
+        _request: Request, error: DeliveryAttemptNotFoundError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"error": "delivery_attempt_not_found", "message": str(error)},
+        )
+
+    @application.exception_handler(RetryNotDueError)
+    async def delivery_retry_not_due(
+        _request: Request, error: RetryNotDueError
+    ) -> JSONResponse:
+        next_retry_at = as_utc(error.next_retry_at)
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={
+                "error": "delivery_retry_not_due",
+                "message": str(error),
+                "details": {
+                    "next_retry_at": next_retry_at.isoformat().replace(
+                        "+00:00", "Z"
+                    )
+                },
+            },
+        )
+
+    @application.exception_handler(DeliveryRetriesExhaustedError)
+    async def delivery_retries_exhausted(
+        _request: Request, error: DeliveryRetriesExhaustedError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={"error": "delivery_retries_exhausted", "message": str(error)},
+        )
+
+    @application.exception_handler(DeliveryIdentityConflictError)
+    async def delivery_identity_conflict(
+        _request: Request, error: DeliveryIdentityConflictError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={"error": "delivery_identity_conflict", "message": str(error)},
+        )
+
+    @application.exception_handler(DeliveryAttemptConflictError)
+    async def delivery_attempt_conflict(
+        _request: Request, error: DeliveryAttemptConflictError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={"error": "delivery_attempt_conflict", "message": str(error)},
+        )
+
+    @application.exception_handler(InvalidDeliveryOutcomeError)
+    async def invalid_delivery_outcome(
+        _request: Request, error: InvalidDeliveryOutcomeError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={"error": "invalid_delivery_outcome", "message": str(error)},
         )

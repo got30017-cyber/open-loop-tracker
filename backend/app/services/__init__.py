@@ -12,6 +12,16 @@ from app.services.sla_service import (
     InvalidSlaActionError,
     SlaService,
 )
+from app.services.delivery_service import (
+    DeliveryAttemptConflictError,
+    DeliveryAttemptNotFoundError,
+    DeliveryAttemptResult,
+    DeliveryIdentityConflictError,
+    DeliveryRetriesExhaustedError,
+    DeliveryService,
+    InvalidDeliveryOutcomeError,
+    RetryNotDueError,
+)
 
 __all__ = [
     "CaseNotFoundError",
@@ -22,4 +32,12 @@ __all__ = [
     "AcknowledgeActionResult",
     "InvalidSlaActionError",
     "SlaService",
+    "DeliveryAttemptConflictError",
+    "DeliveryAttemptNotFoundError",
+    "DeliveryAttemptResult",
+    "DeliveryIdentityConflictError",
+    "DeliveryRetriesExhaustedError",
+    "DeliveryService",
+    "InvalidDeliveryOutcomeError",
+    "RetryNotDueError",
 ]

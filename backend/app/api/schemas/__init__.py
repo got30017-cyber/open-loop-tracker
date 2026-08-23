@@ -15,6 +15,12 @@ from app.api.schemas.cases import (
     CreateCaseRequest,
     ReassignModeratorRequest,
 )
+from app.api.schemas.deliveries import (
+    CompleteDeliveryAttemptRequest,
+    DeliveryAttemptResponse,
+    RetryableDeliveryResponse,
+    StartDeliveryAttemptRequest,
+)
 
 __all__ = [
     "AcknowledgeActionRequest",
@@ -24,7 +30,11 @@ __all__ = [
     "CaseResponse",
     "ClientReplyRequest",
     "CommandResponse",
+    "CompleteDeliveryAttemptRequest",
     "CreateCaseRequest",
     "DueActionResponse",
+    "DeliveryAttemptResponse",
     "ReassignModeratorRequest",
+    "RetryableDeliveryResponse",
+    "StartDeliveryAttemptRequest",
 ]
