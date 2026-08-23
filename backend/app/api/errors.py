@@ -7,6 +7,7 @@ from app.services import (
     CaseNotFoundError,
     DuplicateClientReplyError,
     ExternalMessageIdConflictError,
+    InvalidSlaActionError,
 )
 
 
@@ -55,6 +56,15 @@ def register_exception_handlers(application: FastAPI) -> None:
         return JSONResponse(
             status_code=status.HTTP_409_CONFLICT,
             content={"error": "duplicate_client_reply", "message": str(error)},
+        )
+
+    @application.exception_handler(InvalidSlaActionError)
+    async def invalid_sla_action(
+        _request: Request, error: InvalidSlaActionError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={"error": "invalid_sla_action", "message": str(error)},
         )
 
     @application.exception_handler(SQLAlchemyError)

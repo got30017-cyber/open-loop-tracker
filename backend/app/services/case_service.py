@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from sqlite3 import SQLITE_CONSTRAINT_UNIQUE, IntegrityError as SQLiteIntegrityError
 from typing import Any
 from uuid import uuid4
@@ -7,7 +8,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.models import CaseEventRecord, CaseRecord, ClientReplyRecord
-from app.db.models.common import utc_now
+from app.core.config import Settings, get_settings
+from app.db.models.common import as_naive_utc, utc_now
 from app.db.repositories import CaseRepository
 from app.domain.case import Case as DomainCase
 from app.domain.enums import CaseEventType, CaseStatus
@@ -67,10 +69,14 @@ class CaseService:
     """Application commands with one transaction boundary per mutation."""
 
     def __init__(
-        self, session: Session, repository: CaseRepository | None = None
+        self,
+        session: Session,
+        repository: CaseRepository | None = None,
+        settings: Settings | None = None,
     ) -> None:
         self.session = session
         self.repository = repository or CaseRepository(session)
+        self.settings = settings or get_settings()
 
     def create_case(
         self,
@@ -110,13 +116,19 @@ class CaseService:
         public_id: str,
         actor_type: str | None = None,
         actor_id: str | None = None,
+        now: datetime | None = None,
     ) -> CommandResult:
         try:
             case = self._require_case(public_id)
             if case.status is CaseStatus.WAITING_CLIENT:
                 return CommandResult(case=case, already_processed=True)
             self._apply_transition(case, CaseStatus.WAITING_CLIENT)
-            case.updated_at = utc_now()
+            command_time = as_naive_utc(now) if now is not None else utc_now()
+            case.updated_at = command_time
+            case.client_deadline = command_time + timedelta(
+                minutes=self.settings.client_reminder_1_minutes
+            )
+            case.moderator_deadline = None
             self.repository.add_event(
                 self._event(
                     case, CaseEventType.CLIENT_REQUEST_SENT, actor_type, actor_id
@@ -134,6 +146,7 @@ class CaseService:
         external_message_id: str,
         text: str,
         sender_id: str | None = None,
+        now: datetime | None = None,
     ) -> CommandResult:
         case_id: int | None = None
         try:
@@ -147,8 +160,13 @@ class CaseService:
                     )
                 return CommandResult(case=case, already_processed=True)
             self._validate_transition(case, CaseStatus.WAITING_MODERATOR)
+            command_time = as_naive_utc(now) if now is not None else utc_now()
             case.status = CaseStatus.WAITING_MODERATOR
-            case.updated_at = utc_now()
+            case.updated_at = command_time
+            case.client_deadline = None
+            case.moderator_deadline = command_time + timedelta(
+                minutes=self.settings.moderator_reminder_1_minutes
+            )
             self.repository.add_client_reply(
                 ClientReplyRecord(
                     case_id=case.id,
@@ -193,15 +211,18 @@ class CaseService:
         public_id: str,
         actor_type: str | None = None,
         actor_id: str | None = None,
+        now: datetime | None = None,
     ) -> CommandResult:
         try:
             case = self._require_case(public_id)
             if case.status is CaseStatus.CLOSED:
                 return CommandResult(case=case, already_processed=True)
             self._apply_transition(case, CaseStatus.CLOSED)
-            now = utc_now()
-            case.closed_at = now
-            case.updated_at = now
+            command_time = as_naive_utc(now) if now is not None else utc_now()
+            case.closed_at = command_time
+            case.updated_at = command_time
+            case.client_deadline = None
+            case.moderator_deadline = None
             # One event records the user-facing action; the other records the
             # resulting terminal lifecycle state.
             self.repository.add_event(
@@ -224,16 +245,19 @@ class CaseService:
         cancellation_reason: str,
         actor_type: str | None = None,
         actor_id: str | None = None,
+        now: datetime | None = None,
     ) -> CommandResult:
         try:
             case = self._require_case(public_id)
             if case.status is CaseStatus.CANCELLED:
                 return CommandResult(case=case, already_processed=True)
             self._apply_transition(case, CaseStatus.CANCELLED)
-            now = utc_now()
-            case.cancelled_at = now
+            command_time = as_naive_utc(now) if now is not None else utc_now()
+            case.cancelled_at = command_time
             case.cancellation_reason = cancellation_reason
-            case.updated_at = now
+            case.updated_at = command_time
+            case.client_deadline = None
+            case.moderator_deadline = None
             self.repository.add_event(
                 self._event(case, CaseEventType.CASE_CANCELLED, actor_type, actor_id)
             )
