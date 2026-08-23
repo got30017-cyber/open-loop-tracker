@@ -339,6 +339,61 @@ the flag to `false` afterward and run
 environment. A subsequent `docker compose restart n8n` verifies that the
 published schedule and workflows persist in `n8n_data`.
 
+### Delivery recovery demo
+
+Import and activate `n8n/workflows/delivery-recovery-watchdog.json`. It polls
+once per minute for local demonstration; backend configuration, not n8n, owns
+retry eligibility and the attempt limit. Add these demo-only values to `.env`
+before starting Compose:
+
+```dotenv
+DELIVERY_MAX_ATTEMPTS=3
+DELIVERY_RETRY_DELAY_MINUTES=1
+RECOVERY_DEMO_FORCE_FAILURE=false
+```
+
+The recovery workflow retries only items returned by
+`GET /api/v1/deliveries/retryable`, reuses the backend idempotency key, and has
+no Wait node or workflow-local retry counter. To observe CLIENT_REQUEST recovery,
+create a case, start a failed attempt, wait one demo minute, then run **Delivery
+Recovery Watchdog** manually (or wait for its schedule):
+
+```powershell
+$recoveryCase = Invoke-RestMethod -Method Post `
+    -Uri http://localhost:8000/api/v1/cases `
+    -ContentType application/json `
+    -Body (@{ original_message = "Recovery demo"; moderator_id = "moderator-recovery"; client_contact_id = "client-recovery" } | ConvertTo-Json)
+
+$recoveryKey = "client-request:$($recoveryCase.public_id)"
+$attempt = Invoke-RestMethod -Method Post `
+    -Uri http://localhost:8000/api/v1/deliveries/attempts `
+    -ContentType application/json `
+    -Body (@{ case_public_id = $recoveryCase.public_id; delivery_type = "CLIENT_REQUEST"; recipient_id = "client-recovery"; idempotency_key = $recoveryKey } | ConvertTo-Json)
+
+Invoke-RestMethod -Method Post `
+    -Uri "http://localhost:8000/api/v1/deliveries/$recoveryKey/attempts/$($attempt.attempt_number)/result" `
+    -ContentType application/json `
+    -Body (@{ status = "FAILED"; error_message = "demo failure" } | ConvertTo-Json)
+
+Start-Sleep -Seconds 70
+Invoke-RestMethod http://localhost:8000/api/v1/deliveries/retryable
+```
+
+Run **Delivery Recovery Watchdog**. It creates attempt 2 and the local transport
+succeeds, so the case becomes `WAITING_CLIENT` with one `CLIENT_REQUEST_SENT`
+event. Set `RECOVERY_DEMO_FORCE_FAILURE=true` before recreating n8n to make a
+recovery attempt fail deterministically; reset it to `false` and recreate n8n
+again for the next successful poll. Attempt 3 is the final allowed attempt, and
+no attempt 4 is returned or created.
+
+For an SLA reminder or escalation created by the Phase 8 watchdog, make its
+first transport fail with `SLA_DEMO_FORCE_FAILURE=true`, then reset that flag.
+Once retryable, the recovery workflow uses the backend `sla_action_type` and
+`sla_action_level` hint to ACK the original action after its successful retry.
+Inspect `/api/v1/deliveries/retryable` before recovery and
+`/api/v1/cases/{public_id}/events` afterward. Restart n8n with
+`docker compose restart n8n`; published workflows and persisted retryable
+attempts remain available without in-memory workflow state.
 Stop the stack without deleting either named volume:
 
 ```powershell

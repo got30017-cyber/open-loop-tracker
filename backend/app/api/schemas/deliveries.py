@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 
 from app.api.schemas.cases import as_utc
 from app.domain.delivery import DeliveryStatus, DeliveryType, RetryableDelivery
+from app.domain.sla import SlaActionType
 from app.services import DeliveryAttemptResult
 
 
@@ -61,6 +62,8 @@ class RetryableDeliveryResponse(BaseModel):
     recipient_id: str
     last_attempt_number: int
     next_retry_at: datetime
+    sla_action_type: SlaActionType | None
+    sla_action_level: int | None
 
     @classmethod
     def from_delivery(
@@ -73,4 +76,6 @@ class RetryableDeliveryResponse(BaseModel):
             recipient_id=delivery.recipient_id,
             last_attempt_number=delivery.last_attempt_number,
             next_retry_at=as_utc(delivery.next_retry_at),
+            sla_action_type=delivery.sla_action_type,
+            sla_action_level=delivery.sla_action_level,
         )

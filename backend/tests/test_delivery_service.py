@@ -747,6 +747,44 @@ def test_retryable_query_filters_orders_and_has_no_side_effects(
     assert len(cases.get_case_events(public_id)) == initial_events
 
 
+@pytest.mark.parametrize(
+    ("delivery_type", "key_template", "action_type", "level"),
+    [
+        (DeliveryType.CLIENT_REMINDER, "client-reminder:{case}:1", "REMIND_CLIENT", 1),
+        (DeliveryType.MODERATOR_REMINDER, "moderator-reminder:{case}:2", "REMIND_MODERATOR", 2),
+        (DeliveryType.ESCALATION, "escalation:{case}:client", "ESCALATE_CLIENT_WAIT", None),
+        (DeliveryType.ESCALATION, "escalation:{case}:moderator", "ESCALATE_MODERATOR_WAIT", None),
+    ],
+)
+def test_retryable_sla_delivery_exposes_authoritative_ack_identity(
+    db_session: Session,
+    delivery_type: DeliveryType,
+    key_template: str,
+    action_type: str,
+    level: int | None,
+) -> None:
+    cases, service, public_id = delivery_setup(db_session)
+    db_session.add(
+        DeliveryAttemptRecord(
+            case_id=cases.get_case(public_id).id,
+            delivery_type=delivery_type.value,
+            recipient_id="recipient-1",
+            idempotency_key=key_template.format(case=public_id),
+            attempt_number=1,
+            status=DeliveryStatus.FAILED.value,
+            created_at=START,
+            completed_at=START,
+        )
+    )
+    db_session.commit()
+
+    retryable = service.get_retryable_deliveries(START + timedelta(minutes=5))
+
+    assert len(retryable) == 1
+    assert retryable[0].sla_action_type == action_type
+    assert retryable[0].sla_action_level == level
+
+
 def test_failed_client_request_keeps_case_new_without_sent_event(
     db_session: Session,
 ) -> None:

@@ -25,3 +25,5 @@ class RetryableDelivery:
     recipient_id: str
     last_attempt_number: int
     next_retry_at: datetime
+    sla_action_type: str | None = None
+    sla_action_level: int | None = None

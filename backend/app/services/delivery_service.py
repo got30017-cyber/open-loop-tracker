@@ -11,6 +11,7 @@ from app.db.models.common import as_naive_utc, utc_now
 from app.db.repositories import CaseRepository, DeliveryRepository
 from app.domain.delivery import DeliveryStatus, DeliveryType, RetryableDelivery
 from app.domain.enums import CaseEventType, CaseStatus
+from app.domain.sla import SlaActionType
 from app.domain.state_machine import InvalidStateTransition
 from app.services.case_service import CaseNotFoundError, CaseService
 
@@ -349,10 +350,52 @@ class DeliveryService:
                 recipient_id=attempt.recipient_id,
                 last_attempt_number=attempt.attempt_number,
                 next_retry_at=attempt.completed_at + retry_delay,
+                **self._sla_recovery_identity(attempt),
             )
             for attempt in attempts
             if attempt.completed_at is not None
         ]
+
+    @staticmethod
+    def _sla_recovery_identity(
+        attempt: DeliveryAttemptRecord,
+    ) -> dict[str, str | int | None]:
+        """Return an ACK hint only for backend-owned Phase 8 SLA identities."""
+        case_public_id = attempt.case.public_id
+        delivery_type = DeliveryType(attempt.delivery_type)
+        key = attempt.idempotency_key
+        reminders = {
+            DeliveryType.CLIENT_REMINDER: (
+                "client-reminder",
+                SlaActionType.REMIND_CLIENT,
+            ),
+            DeliveryType.MODERATOR_REMINDER: (
+                "moderator-reminder",
+                SlaActionType.REMIND_MODERATOR,
+            ),
+        }
+        if delivery_type in reminders:
+            name, action_type = reminders[delivery_type]
+            prefix = f"{name}:{case_public_id}:"
+            level = key.removeprefix(prefix) if key.startswith(prefix) else ""
+            if level in {"1", "2"}:
+                return {
+                    "sla_action_type": action_type.value,
+                    "sla_action_level": int(level),
+                }
+        if delivery_type is DeliveryType.ESCALATION:
+            prefix = f"escalation:{case_public_id}:"
+            wait_type = key.removeprefix(prefix) if key.startswith(prefix) else ""
+            action_types = {
+                "client": SlaActionType.ESCALATE_CLIENT_WAIT,
+                "moderator": SlaActionType.ESCALATE_MODERATOR_WAIT,
+            }
+            if wait_type in action_types:
+                return {
+                    "sla_action_type": action_types[wait_type].value,
+                    "sla_action_level": None,
+                }
+        return {"sla_action_type": None, "sla_action_level": None}
 
     @staticmethod
     def _validate_identity(
