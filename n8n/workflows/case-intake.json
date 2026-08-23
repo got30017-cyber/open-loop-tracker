@@ -1,0 +1,112 @@
+{
+  "name": "Case Intake",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "case-intake",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "35af1e3a-e457-4af4-b5dd-48436434ed69",
+      "name": "Case Intake Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-600, 0],
+      "webhookId": "ac1ef7e4-5907-4787-a7ca-89760a3baac9"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "aafaaac3-728c-4160-848f-d3b46bb5e359",
+              "name": "original_message",
+              "value": "={{ $json.body.original_message }}",
+              "type": "string"
+            },
+            {
+              "id": "942c29f5-47d4-4346-b402-7ff8ad3d177c",
+              "name": "moderator_id",
+              "value": "={{ $json.body.moderator_id }}",
+              "type": "string"
+            },
+            {
+              "id": "32b09206-c78f-4523-bafd-c8c27f71c55a",
+              "name": "client_contact_id",
+              "value": "={{ $json.body.client_contact_id }}",
+              "type": "string"
+            },
+            {
+              "id": "5b73f902-e2d3-4f06-8096-69172c8a6b02",
+              "name": "original_message_reference",
+              "value": "={{ $json.body.original_message_reference }}",
+              "type": "string"
+            },
+            {
+              "id": "7b078bf5-8791-4417-93de-a7f5319b58ee",
+              "name": "end_user_reference",
+              "value": "={{ $json.body.end_user_reference }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "c3c8cc89-853d-4292-8356-b41ab0b9e251",
+      "name": "Map Accepted Case Fields",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-360, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BACKEND_BASE_URL }}/api/v1/cases",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {}
+      },
+      "id": "88179c12-45ec-4d9d-9df9-ce43f54583c3",
+      "name": "Create Case via FastAPI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-100, 0],
+      "retryOnFail": false
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { public_id: $json.public_id, status: $json.status } }}",
+        "options": {}
+      },
+      "id": "bc8875f7-123b-4a75-a005-1f8e56a2bad3",
+      "name": "Return Created Case",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [160, 0]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Case Intake Webhook": {
+      "main": [[{"node": "Map Accepted Case Fields", "type": "main", "index": 0}]]
+    },
+    "Map Accepted Case Fields": {
+      "main": [[{"node": "Create Case via FastAPI", "type": "main", "index": 0}]]
+    },
+    "Create Case via FastAPI": {
+      "main": [[{"node": "Return Created Case", "type": "main", "index": 0}]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "5e5c0db6-dbbb-4698-a102-b263bec57fd6",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}
