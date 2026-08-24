@@ -1,401 +1,152 @@
 # Open Loop Tracker
 
-Phase 7 connects the local n8n foundation to the accepted delivery lifecycle for
-client handoff. FastAPI remains the only boundary for case state, idempotency,
-business events, and persistence.
+Open Loop Tracker is a local automation and process-memory project for moving a support case between a moderator and a client without losing the business context when a delivery fails or n8n restarts.
 
-## Run locally
+## Problem
+
+A case is not complete when a message is merely sent. It must retain its current owner, audit history, delivery outcome, retry eligibility, and SLA obligations. This project keeps those facts durable while n8n orchestrates when and where work is transported.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    U[User / Moderator / Client] --> N[n8n\ntriggers, webhooks, transport orchestration, watchdog polling]
+    N --> A[FastAPI / Python\nstate transitions, idempotency, SLA rules, retry eligibility, delivery lifecycle]
+    A --> D[(SQLite\ncases, append-only events, delivery attempts, durable state)]
+    A --> N
+```
+
+- **n8n owns when, where, and transport orchestration.** It receives webhooks, runs scheduled watchdogs, and calls the deterministic local transport.
+- **FastAPI/Python owns whether an action may happen.** It applies the case state machine, idempotency, SLA rules, retry policy, and delivery lifecycle.
+- **SQLite owns what happened.** It is the system of record for cases, append-only events, and delivery attempts. n8n never accesses SQLite directly.
+
+## Main lifecycle
+
+`NEW` → client request delivered → `WAITING_CLIENT` → client reply recorded and moderator notified → `WAITING_MODERATOR` → moderator confirms the answer → `CLOSED`.
+
+The case event history records `CASE_CREATED`, `CLIENT_REQUEST_SENT`, `CLIENT_REPLY_RECEIVED`, `MODERATOR_NOTIFIED`, `USER_ANSWER_CONFIRMED`, and `CASE_CLOSED` as applicable.
+
+## Reliability guarantees
+
+- Idempotent case commands and delivery start/result commands.
+- Append-only business and delivery events.
+- Persistent delivery attempts, fixed retry delay, and a maximum-attempt limit.
+- Read-only retry discovery; the backend decides eligibility.
+- Recovery reuses an existing pending retry after a crash instead of creating the next attempt.
+- SLA watchdog acknowledgements have persistent deduplication keys.
+- A successful delivery produces its business effect once, even with duplicate polling.
+- Restart recovery works because workflow publication is stored in `n8n_data` and business state is stored in SQLite; no workflow-local durable state is required.
+
+## Local setup
+
+Prerequisites: Docker Compose v2. No external credentials, paid services, or database setup are required.
+
+```powershell
+git clone https://github.com/got30017-cyber/open-loop-tracker.git
+cd open-loop-tracker
+Copy-Item .env.example .env
+docker compose up --build -d
+docker compose ps
+Invoke-RestMethod http://localhost:8000/health
+```
+
+FastAPI is available at `http://localhost:8000`; n8n is available at `http://localhost:5678`. SQLite initializes automatically in the named `open_loop_data` volume. n8n state is kept in the named `n8n_data` volume.
+
+### Import n8n workflows
+
+On first use, open n8n, finish local owner setup, and import each JSON file in `n8n/workflows/`:
+
+- Case Intake
+- Send Client Request
+- Client Reply Intake
+- Moderator Answer Confirmation
+- SLA Watchdog
+- Delivery Recovery Watchdog
+
+Activate each imported workflow. Source-controlled workflow JSON intentionally uses `active: false`, so importing alone does not enable schedule triggers. The watchdog workflows each include a Manual Trigger for a one-off run.
+
+## Canonical happy-path demo
+
+Use the active **Case Intake**, **Send Client Request**, **Client Reply Intake**, and **Moderator Answer Confirmation** workflows. This takes about 5–10 minutes including first-time workflow import.
+
+```powershell
+$case = Invoke-RestMethod -Method Post `
+  -Uri http://localhost:5678/webhook/case-intake `
+  -ContentType application/json `
+  -Body (@{ original_message='Where is my order?'; moderator_id='moderator-1'; client_contact_id='client-1' } | ConvertTo-Json)
+
+Invoke-RestMethod -Method Post `
+  -Uri http://localhost:5678/webhook/send-client-request `
+  -ContentType application/json `
+  -Body (@{ public_id=$case.public_id } | ConvertTo-Json)
+
+Invoke-RestMethod -Method Post `
+  -Uri http://localhost:5678/webhook/client-reply-intake `
+  -ContentType application/json `
+  -Body (@{ public_id=$case.public_id; external_message_id='demo-reply-1'; text='The order ships tomorrow'; sender_id='client-1' } | ConvertTo-Json)
+
+Invoke-RestMethod -Method Post `
+  -Uri http://localhost:5678/webhook/moderator-answer-confirmation `
+  -ContentType application/json `
+  -Body (@{ public_id=$case.public_id } | ConvertTo-Json)
+
+Invoke-RestMethod "http://localhost:8000/api/v1/cases/$($case.public_id)"
+Invoke-RestMethod "http://localhost:8000/api/v1/cases/$($case.public_id)/events"
+```
+
+Expected states are `NEW`, `WAITING_CLIENT`, `WAITING_MODERATOR`, then `CLOSED`. The event history shows one business effect for each transition.
+
+## Failure and recovery demo
+
+Set `DELIVERY_RETRY_DELAY_MINUTES=1` and `RECOVERY_DEMO_FORCE_FAILURE=false` in `.env`, then recreate n8n if you changed its flag:
+
+```powershell
+docker compose up -d --force-recreate n8n
+```
+
+Create a case and record a failed client-request attempt through FastAPI:
+
+```powershell
+$case = Invoke-RestMethod -Method Post -Uri http://localhost:8000/api/v1/cases -ContentType application/json -Body (@{ original_message='Recovery demo'; moderator_id='moderator-r'; client_contact_id='client-r' } | ConvertTo-Json)
+$key = "client-request:$($case.public_id)"
+$attempt = Invoke-RestMethod -Method Post -Uri http://localhost:8000/api/v1/deliveries/attempts -ContentType application/json -Body (@{ case_public_id=$case.public_id; delivery_type='CLIENT_REQUEST'; recipient_id='client-r'; idempotency_key=$key } | ConvertTo-Json)
+Invoke-RestMethod -Method Post -Uri "http://localhost:8000/api/v1/deliveries/$key/attempts/$($attempt.attempt_number)/result" -ContentType application/json -Body (@{ status='FAILED'; error_message='demo failure' } | ConvertTo-Json)
+```
+
+After the delay, `GET /api/v1/deliveries/retryable` exposes the logical delivery. Run **Delivery Recovery Watchdog** manually or wait for its one-minute schedule. It creates or reuses attempt 2, reports success, and produces exactly one `CLIENT_REQUEST_SENT` event:
+
+```powershell
+Start-Sleep -Seconds 70
+Invoke-RestMethod http://localhost:8000/api/v1/deliveries/retryable
+Invoke-RestMethod "http://localhost:8000/api/v1/cases/$($case.public_id)/events"
+```
+
+## Configuration
+
+Copy `.env.example` to `.env` to override Compose defaults. SLA values are minutes. The documented defaults are client `120/360/1440`, moderator `30/120/240`, and delivery retries `3` attempts with a five-minute delay. The failure flags affect only the deterministic local demo transport.
+
+## Tests and validation
 
 ```powershell
 cd backend
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-uvicorn app.main:app --reload
-```
-
-The health check is available at `GET http://localhost:8000/health`.
-
-Configuration can be overridden with `APP_NAME`, `APP_ENV`, and `DATABASE_URL`.
-The default database URL is `sqlite:///./open_loop_tracker.db`. Initialize the local
-Phase 2 tables explicitly with:
-
-```powershell
-python -c "from app.db import create_tables, engine; create_tables(engine)"
-```
-
-`CaseService` receives a SQLAlchemy `Session` from its caller. Each mutating command
-commits its case changes, history events, and related rows together, and rolls the
-whole transaction back on failure.
-
-SLA thresholds are configured in minutes. Defaults are client reminders at 120
-and 360 minutes with escalation at 1440 minutes, and moderator reminders at 30
-and 120 minutes with escalation at 240 minutes. Override them with:
-
-- `CLIENT_REMINDER_1_MINUTES`
-- `CLIENT_REMINDER_2_MINUTES`
-- `CLIENT_ESCALATION_MINUTES`
-- `MODERATOR_REMINDER_1_MINUTES`
-- `MODERATOR_REMINDER_2_MINUTES`
-- `MODERATOR_ESCALATION_MINUTES`
-
-Each existing deadline column stores the first reminder deadline for its active
-wait. Later thresholds are derived from that baseline. Client deadlines start on
-`NEW -> WAITING_CLIENT`; client reply clears that deadline and starts the
-moderator deadline; close or cancellation clears both.
-
-Delivery retries default to 3 total attempts with a 5-minute fixed delay. Set
-`DELIVERY_MAX_ATTEMPTS` and `DELIVERY_RETRY_DELAY_MINUTES` to override the policy.
-Retry eligibility is derived from the previous failed attempt's `completed_at`;
-the backend reserves and tracks attempts but never executes external delivery.
-
-## REST API
-
-Case operations are available under `/api/v1/cases`:
-
-- `POST /api/v1/cases`
-- `GET /api/v1/cases/{public_id}`
-- `POST /api/v1/cases/{public_id}/send-to-client`
-- `POST /api/v1/cases/{public_id}/client-reply`
-- `POST /api/v1/cases/{public_id}/user-answered`
-- `POST /api/v1/cases/{public_id}/cancel`
-- `POST /api/v1/cases/{public_id}/reassign`
-- `GET /api/v1/cases/{public_id}/events`
-- `GET /api/v1/actions/due`
-- `POST /api/v1/actions/{case_public_id}/ack`
-- `POST /api/v1/deliveries/attempts`
-- `POST /api/v1/deliveries/{idempotency_key}/attempts/{attempt_number}/result`
-- `GET /api/v1/deliveries/retryable`
-
-Mutation responses include `already_processed` so callers can safely interpret
-supported command retries. The API does not perform external message delivery.
-The due-action endpoint is read-only and returns only the highest reached,
-unacknowledged threshold per active case. The acknowledgement endpoint records a
-reminder or escalation event only after external execution succeeds; it does not
-change case state.
-Delivery start and result commands are idempotent. Failed attempts and reserved
-retries write `DELIVERY_FAILED` and `DELIVERY_RETRIED` events atomically with the
-attempt mutation. The retryable endpoint is read-only.
-
-## Run tests
-
-```powershell
-cd backend
 pytest
+cd ..
+docker compose config
+Get-ChildItem n8n/workflows/*.json | ForEach-Object { Get-Content -Raw $_ | ConvertFrom-Json | Out-Null }
 ```
 
-## Run with Docker
+## Smoke checklist
 
-Prerequisites: Docker Desktop or Docker Engine with Docker Compose v2. No paid
-services or external credentials are required.
+- [ ] `GET /health` returns healthy.
+- [ ] Create a case and send the client request.
+- [ ] Submit a client reply and see `WAITING_MODERATOR`.
+- [ ] Confirm the moderator answer and see `CLOSED`.
+- [ ] Fail one delivery, recover it, and see one business event.
+- [ ] Restart only n8n; confirm active workflows remain available and a persisted retry can still recover.
 
-```powershell
-docker compose up --build
-```
+## Portfolio scope and limitations
 
-This starts:
-
-- FastAPI at `http://localhost:8000` (`GET /health`)
-- n8n Community Edition at `http://localhost:5678`
-
-The backend stores SQLite data in the `open_loop_data` volume. n8n stores its
-local application and workflow state in `n8n_data`, so `docker compose restart
-n8n` does not erase imported workflows. Inside Compose, n8n calls FastAPI through
-`BACKEND_BASE_URL=http://backend:8000`; copy `.env.example` to `.env` only if you
-need to override the documented defaults.
-
-### Case Intake demo
-
-1. Open n8n, complete its local owner setup, and import
-   `n8n/workflows/case-intake.json`.
-2. Activate the imported **Case Intake** workflow.
-3. Call its production webhook:
-
-```powershell
-$body = @{
-    original_message = "Where is my order?"
-    moderator_id = "moderator-1"
-    client_contact_id = "client-1"
-} | ConvertTo-Json
-
-$created = Invoke-RestMethod `
-    -Method Post `
-    -Uri http://localhost:5678/webhook/case-intake `
-    -ContentType application/json `
-    -Body $body
-$created
-```
-
-The response contains the backend-created `public_id` and `status`. Verify the
-persisted case through FastAPI:
-
-```powershell
-Invoke-RestMethod "http://localhost:8000/api/v1/cases/$($created.public_id)"
-```
-
-Verify n8n can reach the backend over the Compose network:
-
-```powershell
-docker compose exec n8n node -e 'fetch(process.env.BACKEND_BASE_URL.concat(`/health`)).then(async response => { console.log(response.status, await response.text()); process.exit(response.ok ? 0 : 1) })'
-```
-
-To verify n8n persistence, restart only that service, reopen the editor, and
-confirm the imported active **Case Intake** workflow is still present:
-
-```powershell
-docker compose restart n8n
-docker compose ps
-```
-
-The workflow forwards the required `original_message` and the optional accepted
-case fields. FastAPI remains authoritative for validation. A backend error stops
-the HTTP Request node and produces a failed, non-successful webhook execution;
-the workflow does not retry or create a second case.
-
-### Client handoff demo
-
-Import and activate `n8n/workflows/send-client-request.json` and
-`n8n/workflows/client-reply-intake.json` alongside **Case Intake**. Create a
-routed case and send its request through the deterministic local transport:
-
-```powershell
-$case = Invoke-RestMethod -Method Post `
-    -Uri http://localhost:8000/api/v1/cases `
-    -ContentType application/json `
-    -Body (@{
-        original_message = "Please check the order status"
-        moderator_id = "moderator-1"
-        client_contact_id = "client-1"
-    } | ConvertTo-Json)
-
-$clientDelivery = Invoke-RestMethod -Method Post `
-    -Uri http://localhost:5678/webhook/send-client-request `
-    -ContentType application/json `
-    -Body (@{ public_id = $case.public_id } | ConvertTo-Json)
-$clientDelivery
-
-Invoke-RestMethod "http://localhost:8000/api/v1/cases/$($case.public_id)"
-```
-
-The case must now be `WAITING_CLIENT`. Submit a client reply; this records the
-reply first, then sends the moderator notification through the same delivery
-lifecycle:
-
-```powershell
-$replyBody = @{
-    public_id = $case.public_id
-    external_message_id = "demo-client-reply-1"
-    text = "The order ships tomorrow"
-    sender_id = "client-1"
-} | ConvertTo-Json
-
-$reply = Invoke-RestMethod -Method Post `
-    -Uri http://localhost:5678/webhook/client-reply-intake `
-    -ContentType application/json `
-    -Body $replyBody
-$reply
-
-$events = Invoke-RestMethod `
-    "http://localhost:8000/api/v1/cases/$($case.public_id)/events"
-$events | Select-Object event_type, metadata
-```
-
-The case remains `WAITING_MODERATOR`; event history contains one each of
-`CLIENT_REQUEST_SENT`, `CLIENT_REPLY_RECEIVED`, and `MODERATOR_NOTIFIED`.
-Submitting `$replyBody` again reuses the same backend delivery identity and does
-not add another reply or moderator business event.
-
-To exercise the required client-delivery failure path, create another routed
-case and invoke `send-client-request` with `simulate_failure = $true`:
-
-```powershell
-$failedCase = Invoke-RestMethod -Method Post `
-    -Uri http://localhost:8000/api/v1/cases `
-    -ContentType application/json `
-    -Body (@{
-        original_message = "Exercise the failure path"
-        moderator_id = "moderator-1"
-        client_contact_id = "client-1"
-    } | ConvertTo-Json)
-
-Invoke-RestMethod -Method Post `
-    -Uri http://localhost:5678/webhook/send-client-request `
-    -ContentType application/json `
-    -Body (@{
-        public_id = $failedCase.public_id
-        simulate_failure = $true
-    } | ConvertTo-Json)
-```
-
-The workflow returns `delivery_status = FAILED`, the attempt records the
-failure, and the case remains `NEW`. No automatic retry is scheduled.
-
-### SLA watchdog and moderator closure demo
-
-Import and activate `n8n/workflows/sla-watchdog.json` and
-`n8n/workflows/moderator-answer-confirmation.json`. The watchdog polls once per
-minute for local demonstration; that interval is orchestration configuration,
-not a business SLA. It also has a Manual Trigger for repeat/duplicate checks.
-
-To avoid waiting for the normal 2-hour and 24-hour thresholds, copy
-`.env.example` to `.env` and use these demo-only values before starting Compose:
-
-```dotenv
-CLIENT_REMINDER_1_MINUTES=1
-CLIENT_REMINDER_2_MINUTES=2
-CLIENT_ESCALATION_MINUTES=3
-MODERATOR_REMINDER_1_MINUTES=1
-MODERATOR_REMINDER_2_MINUTES=2
-MODERATOR_ESCALATION_MINUTES=3
-SLA_DEMO_FORCE_FAILURE=false
-```
-
-Defaults remain `120/360/1440` minutes for client waits and `30/120/240`
-minutes for moderator waits. Create a routed case and move it to
-`WAITING_CLIENT` through the accepted Phase 7 workflow:
-
-```powershell
-$slaClientCase = Invoke-RestMethod -Method Post `
-    -Uri http://localhost:8000/api/v1/cases `
-    -ContentType application/json `
-    -Body (@{
-        original_message = "SLA client demo"
-        moderator_id = "moderator-sla"
-        client_contact_id = "client-sla"
-    } | ConvertTo-Json)
-
-Invoke-RestMethod -Method Post `
-    -Uri http://localhost:5678/webhook/send-client-request `
-    -ContentType application/json `
-    -Body (@{ public_id = $slaClientCase.public_id } | ConvertTo-Json)
-
-Start-Sleep -Seconds 70
-Invoke-RestMethod `
-    "http://localhost:8000/api/v1/cases/$($slaClientCase.public_id)/events"
-```
-
-The scheduled watchdog sends and acknowledges client reminder level 1. Execute
-**SLA Watchdog** manually twice in n8n; the same level is not delivered or
-acknowledged again. Leave this case waiting for three demo minutes to observe
-one `CASE_ESCALATED`; it remains `WAITING_CLIENT`.
-
-For the moderator path, create another case, send it to the client, then submit
-a reply. After one demo minute the watchdog routes the reminder using the
-current backend `moderator_id`:
-
-```powershell
-$slaModeratorCase = Invoke-RestMethod -Method Post `
-    -Uri http://localhost:8000/api/v1/cases `
-    -ContentType application/json `
-    -Body (@{
-        original_message = "SLA moderator demo"
-        moderator_id = "moderator-current"
-        client_contact_id = "client-moderator-demo"
-    } | ConvertTo-Json)
-
-Invoke-RestMethod -Method Post `
-    -Uri http://localhost:5678/webhook/send-client-request `
-    -ContentType application/json `
-    -Body (@{ public_id = $slaModeratorCase.public_id } | ConvertTo-Json)
-
-Invoke-RestMethod -Method Post `
-    -Uri http://localhost:5678/webhook/client-reply-intake `
-    -ContentType application/json `
-    -Body (@{
-        public_id = $slaModeratorCase.public_id
-        external_message_id = "sla-moderator-reply-1"
-        text = "Moderator can answer now"
-        sender_id = "client-moderator-demo"
-    } | ConvertTo-Json)
-
-Start-Sleep -Seconds 70
-Invoke-RestMethod `
-    "http://localhost:8000/api/v1/cases/$($slaModeratorCase.public_id)/events"
-```
-
-Confirm the original user was answered, then repeat the same request to verify
-idempotent closure:
-
-```powershell
-$closeBody = @{ public_id = $slaModeratorCase.public_id } | ConvertTo-Json
-Invoke-RestMethod -Method Post `
-    -Uri http://localhost:5678/webhook/moderator-answer-confirmation `
-    -ContentType application/json -Body $closeBody
-Invoke-RestMethod -Method Post `
-    -Uri http://localhost:5678/webhook/moderator-answer-confirmation `
-    -ContentType application/json -Body $closeBody
-Invoke-RestMethod http://localhost:8000/api/v1/actions/due
-```
-
-The first response is `CLOSED` with `already_processed=false`; the second is
-`CLOSED` with `already_processed=true`. The closed case produces no due action.
-
-For a failure-only smoke test, set `SLA_DEMO_FORCE_FAILURE=true`, recreate n8n
-with `docker compose up -d --force-recreate n8n`, and use a fresh due case. The
-attempt becomes `FAILED`, no SLA acknowledgement event is written, and later
-watchdog polls reuse the failed attempt without creating Phase 9 retries. Reset
-the flag to `false` afterward and run
-`docker compose up -d --force-recreate n8n` again so the container reloads the
-environment. A subsequent `docker compose restart n8n` verifies that the
-published schedule and workflows persist in `n8n_data`.
-
-### Delivery recovery demo
-
-Import and activate `n8n/workflows/delivery-recovery-watchdog.json`. It polls
-once per minute for local demonstration; backend configuration, not n8n, owns
-retry eligibility and the attempt limit. Add these demo-only values to `.env`
-before starting Compose:
-
-```dotenv
-DELIVERY_MAX_ATTEMPTS=3
-DELIVERY_RETRY_DELAY_MINUTES=1
-RECOVERY_DEMO_FORCE_FAILURE=false
-```
-
-The recovery workflow retries only items returned by
-`GET /api/v1/deliveries/retryable`, reuses the backend idempotency key, and has
-no Wait node or workflow-local retry counter. To observe CLIENT_REQUEST recovery,
-create a case, start a failed attempt, wait one demo minute, then run **Delivery
-Recovery Watchdog** manually (or wait for its schedule):
-
-```powershell
-$recoveryCase = Invoke-RestMethod -Method Post `
-    -Uri http://localhost:8000/api/v1/cases `
-    -ContentType application/json `
-    -Body (@{ original_message = "Recovery demo"; moderator_id = "moderator-recovery"; client_contact_id = "client-recovery" } | ConvertTo-Json)
-
-$recoveryKey = "client-request:$($recoveryCase.public_id)"
-$attempt = Invoke-RestMethod -Method Post `
-    -Uri http://localhost:8000/api/v1/deliveries/attempts `
-    -ContentType application/json `
-    -Body (@{ case_public_id = $recoveryCase.public_id; delivery_type = "CLIENT_REQUEST"; recipient_id = "client-recovery"; idempotency_key = $recoveryKey } | ConvertTo-Json)
-
-Invoke-RestMethod -Method Post `
-    -Uri "http://localhost:8000/api/v1/deliveries/$recoveryKey/attempts/$($attempt.attempt_number)/result" `
-    -ContentType application/json `
-    -Body (@{ status = "FAILED"; error_message = "demo failure" } | ConvertTo-Json)
-
-Start-Sleep -Seconds 70
-Invoke-RestMethod http://localhost:8000/api/v1/deliveries/retryable
-```
-
-Run **Delivery Recovery Watchdog**. It creates attempt 2 and the local transport
-succeeds, so the case becomes `WAITING_CLIENT` with one `CLIENT_REQUEST_SENT`
-event. Set `RECOVERY_DEMO_FORCE_FAILURE=true` before recreating n8n to make a
-recovery attempt fail deterministically; reset it to `false` and recreate n8n
-again for the next successful poll. Attempt 3 is the final allowed attempt, and
-no attempt 4 is returned or created.
-
-For an SLA reminder or escalation created by the Phase 8 watchdog, make its
-first transport fail with `SLA_DEMO_FORCE_FAILURE=true`, then reset that flag.
-Once retryable, the recovery workflow uses the backend `sla_action_type` and
-`sla_action_level` hint to ACK the original action after its successful retry.
-Inspect `/api/v1/deliveries/retryable` before recovery and
-`/api/v1/cases/{public_id}/events` afterward. Restart n8n with
-`docker compose restart n8n`; published workflows and persisted retryable
-attempts remain available without in-memory workflow state.
-Stop the stack without deleting either named volume:
-
-```powershell
-docker compose down
-```
+This is deliberately a local Docker Compose portfolio/demo project: SQLite, deterministic local/mock transport, no authentication, no cloud deployment, and no Telegram, Slack, email, or other real provider integration. It has no external paid services and no runtime LLM dependency. These are scope choices, not production-readiness claims.
