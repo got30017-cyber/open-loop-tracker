@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import and_, func, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.db.models import DeliveryAttemptRecord
@@ -96,10 +96,20 @@ class DeliveryRepository:
                     ),
                 )
                 .where(
-                    DeliveryAttemptRecord.status == DeliveryStatus.FAILED.value,
-                    DeliveryAttemptRecord.completed_at.is_not(None),
-                    DeliveryAttemptRecord.completed_at <= completed_by,
-                    DeliveryAttemptRecord.attempt_number < max_attempts,
+                    or_(
+                        and_(
+                            DeliveryAttemptRecord.status
+                            == DeliveryStatus.FAILED.value,
+                            DeliveryAttemptRecord.completed_at.is_not(None),
+                            DeliveryAttemptRecord.completed_at <= completed_by,
+                            DeliveryAttemptRecord.attempt_number < max_attempts,
+                        ),
+                        and_(
+                            DeliveryAttemptRecord.status
+                            == DeliveryStatus.PENDING.value,
+                            DeliveryAttemptRecord.attempt_number > 1,
+                        ),
+                    ),
                     DeliveryAttemptRecord.idempotency_key.not_in(succeeded_keys),
                 )
                 .order_by(DeliveryAttemptRecord.idempotency_key)
